@@ -2,7 +2,7 @@
    CONFIG
    ========================= */
 
-const DEFAULT_GOOGLE_OAUTH_CLIENT_ID = "641865656292-2seuocq4kjjgr028dlfhjbfmucss8q0l.apps.googleusercontent.com.apps.googleusercontent.com";
+const DEFAULT_GOOGLE_OAUTH_CLIENT_ID = "641865656292-2seuocq4kjjgr028dlfhjbfmucss8q0l.apps.googleusercontent.com";
 
 
 /* =========================
@@ -722,3 +722,4 @@ document.getElementById("syncBtn").addEventListener("click", async () => {
 try {
   document.getElementById("clientIdBox").value = DEFAULT_GOOGLE_OAUTH_CLIENT_ID || "";
 } catch {}
+
