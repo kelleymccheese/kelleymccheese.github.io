@@ -1,14 +1,12 @@
 /* =========================
    CONFIG
-   ========================= */
-
+   =========================
+*/
 const DEFAULT_GOOGLE_OAUTH_CLIENT_ID = "641865656292-2seuocq4kjjgr028dlfhjbfmucss8q0l.apps.googleusercontent.com";
-
 
 /* =========================
    Utilities
    ========================= */
-
 const MONTHS = {
   january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
   july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
@@ -24,7 +22,7 @@ function icsEscape(s) {
     .replace(/\r?\n/g, "\\n");
 }
 
-// FNV-1a 32-bit hash
+// FNV-1a 32-bit hash -> 8 hex chars
 function fnv1a(str) {
   let h = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
@@ -34,7 +32,7 @@ function fnv1a(str) {
   return ("00000000" + h.toString(16)).slice(-8);
 }
 
-// 16 hex chars via two FNV passes
+// 16 hex chars from two passes (still only [0-9a-f])
 function fnv1a16(str) {
   return fnv1a(str) + fnv1a(str + "|x");
 }
@@ -64,12 +62,8 @@ function isCalendarNavLine(line) {
 function shouldIgnore(title, ignoreRules) {
   const t = String(title || "").trim();
   if (!t) return true;
-
-  // Always ignore RDO
-  if (t.toLowerCase() === "rdo") return true;
-
-  // Always ignore navigation/footer content
-  if (isCalendarNavLine(t)) return true;
+  if (t.toLowerCase() === "rdo") return true;          // always ignore day off
+  if (isCalendarNavLine(t)) return true;               // always ignore footer/nav
 
   const lower = t.toLowerCase();
   return ignoreRules.some(rule => {
@@ -79,18 +73,19 @@ function shouldIgnore(title, ignoreRules) {
 }
 
 // Date helpers
-function makeDate(year, month, day) {
-  return new Date(year, month - 1, day, 0, 0, 0, 0);
-}
+function makeDate(year, month, day) { return new Date(year, month - 1, day, 0, 0, 0, 0); }
+
 function combine(dateObj, hhmm) {
   const [h, m] = hhmm.split(":").map(Number);
   const d = new Date(dateObj.getTime());
   d.setHours(h, m, 0, 0);
   return d;
 }
+
 function fmtLocalDT(dt) {
   return `${dt.getFullYear()}${pad2(dt.getMonth()+1)}${pad2(dt.getDate())}T${pad2(dt.getHours())}${pad2(dt.getMinutes())}${pad2(dt.getSeconds())}`;
 }
+
 function fmtDateOnly(dt) {
   return `${dt.getFullYear()}${pad2(dt.getMonth()+1)}${pad2(dt.getDate())}`;
 }
@@ -110,42 +105,20 @@ function toRFC3339Local(dt) {
   return `${y}-${m}-${d}T${hh}:${mm}:${ss}${sign}${offH}:${offM}`;
 }
 
-function dateOnly(dt) {
-  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
-}
-
-// Key used for matching existing events (survives title changes)
-function matchKeyFromParsed(ev, tz) {
-  if (ev.allDay) {
-    return `D|${dateOnly(ev.start)}|${dateOnly(ev.end)}|${tz}`;
-  }
-  return `T|${toRFC3339Local(ev.start)}|${toRFC3339Local(ev.end)}|${tz}`;
-}
-
-function matchKeyFromGoogleItem(item, tz) {
-  // item.start can be {date} or {dateTime}
-  if (item.start?.date) {
-    const s = item.start.date;
-    const e = item.end?.date;
-    return `D|${s}|${e}|${tz}`;
-  }
-  const sdt = item.start?.dateTime;
-  const edt = item.end?.dateTime;
-  if (!sdt || !edt) return null;
-  return `T|${sdt}|${edt}|${tz}`;
-}
-
+function dateOnly(dt) { return `${dt.getFullYear()}-${pad2(dt.getMonth()+1)}-${pad2(dt.getDate())}`; }
+function addDays(d, n) { const x = new Date(d.getTime()); x.setDate(x.getDate() + n); return x; }
+function safeKeyPart(s) { return String(s || "").replaceAll("|", " ").trim(); }
 
 /* =========================
    Parsing
    ========================= */
-
 const DAY_LINE = /^\s*(\d{1,2})\s*$/;
 const MONTH_YEAR = /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{4})\b/i;
 const ITEM_BRACKETS = /^(?<title>.+?)\[(?<range>.+?)\]\s*$/;
 
-// Overnight: "22:00-03-06:00" means start 22:00 on day 03, end 06:00 on cell day
+// Overnight format: "22:00-03-06:00" => start 22:00 on day 03, end 06:00 on the cell day
 const OVERNIGHT = /^(?<start>\d{2}:\d{2})-(?<startDay>\d{2})-(?<end>\d{2}:\d{2})$/;
+// Standard: "07:00-15:00"
 const STANDARD = /^(?<start>\d{2}:\d{2})-(?<end>\d{2}:\d{2})$/;
 
 function parseMarsPaste(text, ignoreRules) {
@@ -165,6 +138,7 @@ function parseMarsPaste(text, ignoreRules) {
   if (!month || !year) throw new Error("Couldn't find Month + Year like 'February 2026'.");
 
   const events = [];
+  const occMap = new Map(); // baseSig -> occurrence count (to avoid ID collisions)
 
   let i = 0;
   while (i < lines.length) {
@@ -178,9 +152,7 @@ function parseMarsPaste(text, ignoreRules) {
     const block = [];
     while (i < lines.length && !DAY_LINE.test(lines[i])) {
       const ln = lines[i].trim();
-
-      if (ln && isCalendarNavLine(ln)) break;
-
+      if (ln && isCalendarNavLine(ln)) break; // stop at footer/nav
       if (ln) block.push(ln);
       i++;
     }
@@ -193,12 +165,20 @@ function parseMarsPaste(text, ignoreRules) {
       if (!b) {
         const title = line;
         if (shouldIgnore(title, ignoreRules)) continue;
+
+        const end = new Date(cellDate.getTime() + 24*3600*1000);
+        const baseSig = `A|${title}|${cellDate.getTime()}|${end.getTime()}`;
+        const occ = (occMap.get(baseSig) || 0) + 1;
+        occMap.set(baseSig, occ);
+
         events.push({
           use: true,
           title,
+          sourceTitle: title,
+          occ,
           allDay: true,
           start: cellDate,
-          end: new Date(cellDate.getTime() + 24*3600*1000),
+          end,
           raw: line,
           warnings: []
         });
@@ -220,7 +200,7 @@ function parseMarsPaste(text, ignoreRules) {
 
         let startDate = makeDate(year, month, startDay);
 
-        // month boundary: startDay > cellDay means previous month
+        // month boundary: if startDay > cellDay, start is in previous month
         if (startDay > cellDay) {
           const tmp = makeDate(year, month, 1);
           tmp.setMonth(tmp.getMonth() - 1);
@@ -238,12 +218,19 @@ function parseMarsPaste(text, ignoreRules) {
         const sm = range.match(STANDARD);
         if (!sm) {
           warnings.push(`Unrecognized time range: [${range}] (kept as all-day unless you edit)`);
+          const end = new Date(cellDate.getTime() + 24*3600*1000);
+          const baseSig = `A|${title}|${cellDate.getTime()}|${end.getTime()}`;
+          const occ = (occMap.get(baseSig) || 0) + 1;
+          occMap.set(baseSig, occ);
+
           events.push({
             use: true,
             title,
+            sourceTitle: title,
+            occ,
             allDay: true,
             start: cellDate,
-            end: new Date(cellDate.getTime() + 24*3600*1000),
+            end,
             raw: line,
             warnings
           });
@@ -259,9 +246,15 @@ function parseMarsPaste(text, ignoreRules) {
         }
       }
 
+      const baseSig = `T|${title}|${startDT.getTime()}|${endDT.getTime()}`;
+      const occ = (occMap.get(baseSig) || 0) + 1;
+      occMap.set(baseSig, occ);
+
       events.push({
         use: true,
         title,
+        sourceTitle: title,
+        occ,
         allDay: false,
         start: startDT,
         end: endDT,
@@ -274,11 +267,9 @@ function parseMarsPaste(text, ignoreRules) {
   return { month, year, events };
 }
 
-
 /* =========================
    ICS generation
    ========================= */
-
 function toICS(events) {
   const dtstamp = new Date();
   const dtstampZ = dtstamp.toISOString().replace(/[-:]/g,"").replace(/\.\d{3}Z$/, "Z");
@@ -318,17 +309,14 @@ function toICS(events) {
   return lines.join("\r\n") + "\r\n";
 }
 
-
 /* =========================
    UI state + rendering
    ========================= */
-
 let current = null;
 
 function render() {
   const tbody = document.querySelector("#eventsTable tbody");
   tbody.innerHTML = "";
-
   if (!current) return;
 
   const events = current.events;
@@ -377,16 +365,13 @@ function render() {
   }
 }
 
-function clearSyncLog() {
-  const el = document.getElementById("syncLog");
-  el.textContent = "";
-}
+function clearSyncLog() { document.getElementById("syncLog").textContent = ""; }
 function logSync(msg) {
   const el = document.getElementById("syncLog");
   el.textContent = (el.textContent ? el.textContent + "\n" : "") + msg;
 }
 
-// default ignore
+// default ignore (RDO is auto-ignored)
 document.getElementById("ignoreBox").value = "NH CLASS";
 
 document.getElementById("parseBtn").addEventListener("click", () => {
@@ -424,11 +409,9 @@ document.getElementById("downloadBtn").addEventListener("click", () => {
   URL.revokeObjectURL(url);
 });
 
-
 /* =========================
    Google Sync
    ========================= */
-
 let tokenClient = null;
 let accessToken = null;
 let accessTokenExpiryMs = 0;
@@ -437,11 +420,9 @@ function getClientId() {
   const box = document.getElementById("clientIdBox");
   let v = (box.value || "").trim();
   if (!v) v = DEFAULT_GOOGLE_OAUTH_CLIENT_ID;
-
   if (!v || v.includes("PASTE_YOUR_CLIENT_ID")) {
     throw new Error("Set DEFAULT_GOOGLE_OAUTH_CLIENT_ID in app.js to your real OAuth Client ID.");
   }
-
   box.value = v;
   return v;
 }
@@ -451,15 +432,11 @@ function initGoogleTokenClient() {
   if (!window.google?.accounts?.oauth2) {
     throw new Error("Google OAuth library not loaded yet. Refresh and try again.");
   }
-
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: clientId,
     scope: "https://www.googleapis.com/auth/calendar",
     callback: (resp) => {
-      if (resp.error) {
-        logSync("OAuth error: " + resp.error);
-        return;
-      }
+      if (resp.error) { logSync("OAuth error: " + resp.error); return; }
       accessToken = resp.access_token;
       const expiresIn = Number(resp.expires_in || 3600);
       accessTokenExpiryMs = Date.now() + (expiresIn * 1000) - 30_000;
@@ -504,11 +481,28 @@ async function apiFetch(url, options = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-// Event IDs must be lowercase base32hex [a-v0-9]; hex [0-9a-f] is OK; no hyphens.
-function makeEventId(ev, tz) {
-  // IMPORTANT: exclude title so title changes can be patched without changing identity.
-  const key = matchKeyFromParsed(ev, tz) + "|" + ev.allDay;
-  return `mars${fnv1a16(key)}`;
+// Match keys (exact + "loose" without occ to self-heal if occ shifts)
+function matchKeyFromParsed(ev, tz) {
+  const src = safeKeyPart(ev.sourceTitle || ev.title);
+  const occ = ev.occ || 1;
+  if (ev.allDay) return `D|${dateOnly(ev.start)}|${dateOnly(ev.end)}|${src}|${occ}|${tz}`;
+  return `T|${toRFC3339Local(ev.start)}|${toRFC3339Local(ev.end)}|${src}|${occ}|${tz}`;
+}
+function looseKeyFromParsed(ev, tz) {
+  const src = safeKeyPart(ev.sourceTitle || ev.title);
+  if (ev.allDay) return `D|${dateOnly(ev.start)}|${dateOnly(ev.end)}|${src}|${tz}`;
+  return `T|${toRFC3339Local(ev.start)}|${toRFC3339Local(ev.end)}|${src}|${tz}`;
+}
+function looseKeyFromMatchKey(mk) {
+  const parts = String(mk || "").split("|");
+  if (parts.length !== 6) return null; // expected: type|start|end|src|occ|tz
+  const [type, start, end, src, _occ, tz] = parts;
+  return `${type}|${start}|${end}|${src}|${tz}`;
+}
+
+// Google event IDs must be lowercase base32hex [a-v0-9] (hex [0-9a-f] is OK). No hyphens.
+function makeEventIdFromMatchKey(mk) {
+  return `mars${fnv1a16(mk)}`;
 }
 
 async function getOrCreateCalendarIdByName(name) {
@@ -523,13 +517,11 @@ async function getOrCreateCalendarIdByName(name) {
   return created.id;
 }
 
-function eventPatchBodyFromParsed(ev, tz) {
-  const mk = matchKeyFromParsed(ev, tz);
-
+function eventPatchBodyFromParsed(ev, tz, mkExact) {
   const body = {
     summary: ev.title,
     description: `RAW: ${ev.raw}${ev.warnings?.length ? "\nWARNINGS: " + ev.warnings.join(" | ") : ""}`,
-    extendedProperties: { private: { marsMatchKey: mk } }
+    extendedProperties: { private: { marsMatchKey: mkExact } }
   };
 
   if (ev.allDay) {
@@ -542,16 +534,24 @@ function eventPatchBodyFromParsed(ev, tz) {
   return body;
 }
 
-async function insertEvent(calendarId, eventId, body) {
-  const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
-  // insert allows "id" in resource; body here is PATCH-style, so add id
-  const insertBody = { id: eventId, ...body };
-  await apiFetch(base, { method: "POST", body: JSON.stringify(insertBody) });
-}
-
 async function patchEvent(calendarId, googleEventId, body) {
   const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(googleEventId)}`;
   await apiFetch(url, { method: "PATCH", body: JSON.stringify(body) });
+}
+
+// Insert with deterministic ID; if 409 happens anyway, patch instead
+async function insertEvent(calendarId, eventId, body) {
+  const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
+  const insertBody = { id: eventId, ...body };
+  try {
+    await apiFetch(base, { method: "POST", body: JSON.stringify(insertBody) });
+  } catch (e) {
+    if (e.status === 409) {
+      await patchEvent(calendarId, eventId, body);
+      return;
+    }
+    throw e;
+  }
 }
 
 async function listEventsInRange(calendarId, timeMinIso, timeMaxIso) {
@@ -581,31 +581,32 @@ async function deleteEvent(calendarId, eventId) {
 function monthRangeFromCurrent() {
   if (!current) throw new Error("Parse a month first.");
   const start = new Date(current.year, current.month - 1, 1, 0, 0, 0, 0);
-  const end = new Date(current.year, current.month, 1, 0, 0, 0, 0);
+  const end = new Date(current.year, current.month, 1, 0, 0, 0, 0); // end-exclusive
   return { start, end };
 }
 
-function addDays(d, n) {
-  const x = new Date(d.getTime());
-  x.setDate(x.getDate() + n);
-  return x;
-}
+function buildExistingIndex(items) {
+  // exact: mkExact -> [eventId...]
+  // loose: mkLoose -> [eventId...]
+  const exact = new Map();
+  const loose = new Map();
 
-// Build an index of existing MARS events by matchKey so we can patch even if older IDs differ.
-function buildExistingIndex(items, tz) {
-  const map = new Map(); // key -> [eventId,...]
   for (const it of items) {
     if (!it?.id || !String(it.id).startsWith("mars")) continue;
 
-    // Prefer stored match key if present
     const stored = it.extendedProperties?.private?.marsMatchKey;
-    const key = stored || matchKeyFromGoogleItem(it, tz);
-    if (!key) continue;
+    if (!stored) continue; // only trust stored keys for matching (reliable)
 
-    if (!map.has(key)) map.set(key, []);
-    map.get(key).push(it.id);
+    if (!exact.has(stored)) exact.set(stored, []);
+    exact.get(stored).push(it.id);
+
+    const lk = looseKeyFromMatchKey(stored);
+    if (lk) {
+      if (!loose.has(lk)) loose.set(lk, []);
+      loose.get(lk).push(it.id);
+    }
   }
-  return map;
+  return { exact, loose };
 }
 
 document.getElementById("connectBtn").addEventListener("click", async () => {
@@ -635,12 +636,14 @@ document.getElementById("syncBtn").addEventListener("click", async () => {
     const calendarId = await getOrCreateCalendarIdByName(calName);
     logSync("Calendar OK.");
 
-    // Compute ranges for THIS pasted month/year and compare to actual now
     const { start: monthStart, end: monthEnd } = monthRangeFromCurrent();
-    const syncRangeStart = addDays(monthStart, -1); // buffer for overnight starting previous day
+
+    // buffer 1 day back to capture overnight shifts that start the previous day
+    const syncRangeStart = addDays(monthStart, -1);
     const syncRangeEnd = monthEnd;
 
     const now = new Date();
+    const nowPlus1s = new Date(now.getTime() + 1000); // avoid deleting something that starts "exactly now"
 
     logSync(`Now: ${now.toISOString()}`);
     logSync(`Pasted month: ${current.year}-${pad2(current.month)}`);
@@ -649,10 +652,11 @@ document.getElementById("syncBtn").addEventListener("click", async () => {
 
     const selected = current.events
       .filter(e => e.use)
-      .filter(e => e.end > syncRangeStart && e.start < syncRangeEnd);
+      .filter(e => e.end > syncRangeStart && e.start < syncRangeEnd)
+      .sort((a,b) => a.start - b.start);
 
-    // FUTURE behavior: delete everything in the future (by start time) within sync range, then recreate
-    const futureFrom = new Date(Math.max(now.getTime(), syncRangeStart.getTime()));
+    // FUTURE rule: delete everything in the future window, then recreate
+    const futureFrom = new Date(Math.max(nowPlus1s.getTime(), syncRangeStart.getTime()));
     let deleted = 0;
 
     if (futureFrom < syncRangeEnd) {
@@ -669,50 +673,58 @@ document.getElementById("syncBtn").addEventListener("click", async () => {
       logSync("No future window inside this pasted month; skipping future delete.");
     }
 
-    // Build index of existing PAST/CURRENT MARS events so we can patch them even if IDs differ
+    // Past/current: patch when possible (archive), otherwise insert
     const pastTo = new Date(Math.min(now.getTime(), syncRangeEnd.getTime()));
-    let existingIndex = new Map();
+    let idx = { exact: new Map(), loose: new Map() };
 
     if (syncRangeStart < pastTo) {
       logSync(`Indexing existing past/current MARS events from ${syncRangeStart.toISOString()} → ${pastTo.toISOString()} …`);
       const pastItems = await listEventsInRange(calendarId, syncRangeStart.toISOString(), pastTo.toISOString());
-      existingIndex = buildExistingIndex(pastItems, tz);
-      logSync(`Indexed ${pastItems.filter(it => it?.id && String(it.id).startsWith("mars")).length} MARS event(s) in past/current window.`);
+      idx = buildExistingIndex(pastItems);
+      const countMars = pastItems.filter(it => it?.id && String(it.id).startsWith("mars")).length;
+      logSync(`Indexed ${countMars} MARS event(s) in past/current window.`);
     }
 
-    // Apply: past/current => PATCH existing if match found; else INSERT
-    //        future       => INSERT (we deleted all future ones first)
-    let patched = 0, created = 0;
-
-    // Sort to make behavior consistent
-    selected.sort((a,b) => a.start - b.start);
+    let patched = 0, patchedLoose = 0, created = 0;
 
     for (const ev of selected) {
-      const isFuture = ev.start.getTime() > now.getTime(); // “happening now” counts as past/current
-      const mk = matchKeyFromParsed(ev, tz);
-      const patchBody = eventPatchBodyFromParsed(ev, tz);
+      const isFuture = ev.start.getTime() > now.getTime(); // "happening now" counts as past/current
+
+      const mkExact = matchKeyFromParsed(ev, tz);
+      const mkLoose = looseKeyFromParsed(ev, tz);
+      const body = eventPatchBodyFromParsed(ev, tz, mkExact);
+      const newId = makeEventIdFromMatchKey(mkExact);
 
       if (!isFuture) {
-        const candidates = existingIndex.get(mk);
-        if (candidates && candidates.length) {
-          const existingId = candidates.shift(); // consume one
-          await patchEvent(calendarId, existingId, patchBody);
-          patched++;
-          continue;
+        // Prefer exact match; if not found, try loose match (self-heals occ shifts)
+        let existingId = null;
+
+        const exactCandidates = idx.exact.get(mkExact);
+        if (exactCandidates && exactCandidates.length) {
+          existingId = exactCandidates.shift();
+        } else {
+          const looseCandidates = idx.loose.get(mkLoose);
+          if (looseCandidates && looseCandidates.length) {
+            existingId = looseCandidates.shift();
+          }
         }
-        // no match => create new archival entry
-        const newId = makeEventId(ev, tz);
-        await insertEvent(calendarId, newId, patchBody);
-        created++;
+
+        if (existingId) {
+          await patchEvent(calendarId, existingId, body);
+          if (existingId && !idx.exact.has(mkExact)) patchedLoose++;
+          else patched++;
+        } else {
+          await insertEvent(calendarId, newId, body);
+          created++;
+        }
       } else {
-        // future => recreate
-        const newId = makeEventId(ev, tz);
-        await insertEvent(calendarId, newId, patchBody);
+        // Future is recreated fresh
+        await insertEvent(calendarId, newId, body);
         created++;
       }
     }
 
-    logSync(`Done. Patched (past/current): ${patched}. Created (new/recreated): ${created}. Future deleted: ${deleted}.`);
+    logSync(`Done. Patched (exact): ${patched}. Patched (loose/healed): ${patchedLoose}. Created (new/recreated): ${created}. Future deleted: ${deleted}.`);
   } catch (e) {
     logSync("Sync failed: " + (e.message || e));
   }
@@ -722,4 +734,3 @@ document.getElementById("syncBtn").addEventListener("click", async () => {
 try {
   document.getElementById("clientIdBox").value = DEFAULT_GOOGLE_OAUTH_CLIENT_ID || "";
 } catch {}
-
