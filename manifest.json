@@ -1,0 +1,9 @@
+{
+  "name": "MARS Paste to ICS",
+  "short_name": "MARS→ICS",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#1f6feb",
+  "icons": []
+}

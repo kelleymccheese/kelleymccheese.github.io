@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>MARS Paste → ICS</title>
+  <link rel="manifest" href="manifest.json" />
+  <style>
+    body { font-family: system-ui, Arial, sans-serif; margin: 16px; line-height: 1.35; }
+    textarea, input { width: 100%; box-sizing: border-box; }
+    textarea { min-height: 160px; }
+    .row { display: grid; grid-template-columns: 1fr; gap: 12px; }
+    .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; }
+    .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+    button { padding: 10px 12px; border-radius: 8px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
+    button.primary { background: #1f6feb; color: white; border-color: #1f6feb; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th, td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }
+    .warn { color: #8a5a00; }
+    .muted { color: #666; }
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h2>MARS Paste → ICS</h2>
+  <p class="muted">
+    Paste one month of schedule text, review what it parses, and download an ICS to import or sync.
+  </p>
+
+  <div class="row">
+    <div class="card">
+      <label><strong>Paste schedule text</strong></label>
+      <textarea id="pasteBox" placeholder="Paste the month text here..."></textarea>
+    </div>
+
+    <div class="card">
+      <label><strong>Ignore items containing (one per line)</strong></label>
+      <textarea id="ignoreBox" placeholder="RDO&#10;NH CLASS"></textarea>
+      <div class="muted" style="margin-top:6px">
+        Tip: simple substring match (case-insensitive). Put <span class="pill">/regex/</span> to use a regular expression.
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="buttons">
+        <button id="parseBtn" class="primary">Parse</button>
+        <button id="selectAllBtn">Select all</button>
+        <button id="selectNoneBtn">Select none</button>
+        <button id="downloadBtn">Download ICS</button>
+      </div>
+      <div id="summary" class="muted" style="margin-top:8px"></div>
+      <div id="warnings" class="warn" style="margin-top:6px"></div>
+    </div>
+
+    <div class="card">
+      <div style="overflow:auto">
+        <table id="eventsTable">
+          <thead>
+            <tr>
+              <th>Use</th>
+              <th>Date/Time</th>
+              <th>Title (editable)</th>
+              <th>Warnings</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+  <script>
+    // Register service worker (PWA offline) when served from https or localhost
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+    }
+  </script>
+</body>
+</html>
