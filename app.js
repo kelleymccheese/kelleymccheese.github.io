@@ -64,10 +64,6 @@
   });
 
   function partsInTZ(date) {
-    function fmtCentral(date) {
-        const p = partsInTZ(date);
-        return `${p.y}-${pad2(p.m)}-${pad2(p.d)} ${pad2(p.hh)}:${pad2(p.mm)}:${pad2(p.ss)} (${TZ})`;
-    }
     const parts = dtfParts.formatToParts(date);
     const out = {};
     for (const p of parts) {
@@ -79,6 +75,11 @@
       if (p.type === "second") out.ss = Number(p.value);
     }
     return out;
+  }
+
+  function fmtCentral(date) {
+    const p = partsInTZ(date);
+    return `${p.y}-${pad2(p.m)}-${pad2(p.d)} ${pad2(p.hh)}:${pad2(p.mm)}:${pad2(p.ss)} (${TZ})`;
   }
 
   // Offset of TZ relative to UTC at timestamp ts (ms): e.g. -21600000 for CST
@@ -759,4 +760,3 @@
   initDefaults();
   render();
 })();
-
