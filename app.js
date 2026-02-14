@@ -361,3 +361,242 @@ document.getElementById("downloadBtn").addEventListener("click", () => {
   a.click();
   URL.revokeObjectURL(url);
 });
+
+// ---------------- Google Sync (Phase 2) ----------------
+let tokenClient = null;
+let accessToken = null;
+let accessTokenExpiryMs = 0;
+
+function logSync(msg) {
+  const el = document.getElementById("syncLog");
+  el.textContent = (el.textContent ? el.textContent + "\n" : "") + msg;
+}
+
+function getClientId() {
+  const box = document.getElementById("clientIdBox");
+  const v = (box.value || "").trim();
+  if (!v) throw new Error("Paste your Google OAuth Client ID first.");
+  localStorage.setItem("mars_client_id", v);
+  return v;
+}
+
+function initGoogleTokenClient() {
+  const clientId = getClientId();
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: clientId,
+    scope: "https://www.googleapis.com/auth/calendar",
+    callback: (resp) => {
+      if (resp.error) {
+        logSync("OAuth error: " + resp.error);
+        return;
+      }
+      accessToken = resp.access_token;
+      const expiresIn = Number(resp.expires_in || 3600);
+      accessTokenExpiryMs = Date.now() + (expiresIn * 1000) - 30_000; // 30s buffer
+      logSync("Connected.");
+    }
+  });
+}
+
+async function ensureAccessToken(interactive = false) {
+  if (accessToken && Date.now() < accessTokenExpiryMs) return accessToken;
+  if (!tokenClient) initGoogleTokenClient();
+
+  return new Promise((resolve, reject) => {
+    tokenClient.callback = (resp) => {
+      if (resp.error) return reject(new Error(resp.error));
+      accessToken = resp.access_token;
+      const expiresIn = Number(resp.expires_in || 3600);
+      accessTokenExpiryMs = Date.now() + (expiresIn * 1000) - 30_000;
+      resolve(accessToken);
+    };
+    tokenClient.requestAccessToken({ prompt: interactive ? "consent" : "" });
+  });
+}
+
+async function apiFetch(url, options = {}) {
+  const token = await ensureAccessToken(false);
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      ...(options.headers || {}),
+      "Authorization": `Bearer ${token}`,
+      "Content-Type": "application/json"
+    }
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    const err = new Error(`HTTP ${res.status}: ${text.slice(0, 300)}`);
+    err.status = res.status;
+    err.body = text;
+    throw err;
+  }
+  return text ? JSON.parse(text) : null;
+}
+
+function toRFC3339Local(dt) {
+  const y = dt.getFullYear();
+  const m = pad2(dt.getMonth() + 1);
+  const d = pad2(dt.getDate());
+  const hh = pad2(dt.getHours());
+  const mm = pad2(dt.getMinutes());
+  const ss = pad2(dt.getSeconds());
+  const offMin = -dt.getTimezoneOffset(); // minutes east of UTC
+  const sign = offMin >= 0 ? "+" : "-";
+  const offAbs = Math.abs(offMin);
+  const offH = pad2(Math.floor(offAbs / 60));
+  const offM = pad2(offAbs % 60);
+  return `${y}-${m}-${d}T${hh}:${mm}:${ss}${sign}${offH}:${offM}`;
+}
+
+function dateOnly(dt) {
+  return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+}
+
+// 16-hex stable id using two FNV passes (good enough for this use)
+function fnv1a16(str) {
+  return fnv1a(str) + fnv1a(str + "|x");
+}
+
+function makeEventId(ev) {
+  const key = `${ev.title}|${ev.allDay ? dateOnly(ev.start) : toRFC3339Local(ev.start)}|${ev.allDay ? "" : toRFC3339Local(ev.end)}|${ev.raw}`;
+  return `mars-${fnv1a16(key)}`; // valid Google event id chars
+}
+
+async function getOrCreateCalendarIdByName(name) {
+  // list calendars
+  const list = await apiFetch("https://www.googleapis.com/calendar/v3/users/me/calendarList?maxResults=250");
+  const found = (list.items || []).find(c => (c.summary || "") === name);
+  if (found) return found.id;
+
+  // create calendar
+  const created = await apiFetch("https://www.googleapis.com/calendar/v3/calendars", {
+    method: "POST",
+    body: JSON.stringify({ summary: name })
+  });
+  return created.id;
+}
+
+function eventBodyFromParsed(ev, tz) {
+  const body = {
+    id: makeEventId(ev),
+    summary: ev.title,
+    description: `RAW: ${ev.raw}${ev.warnings?.length ? "\nWARNINGS: " + ev.warnings.join(" | ") : ""}`
+  };
+
+  if (ev.allDay) {
+    body.start = { date: dateOnly(ev.start) };
+    body.end = { date: dateOnly(ev.end) }; // end is already +1 day
+  } else {
+    body.start = { dateTime: toRFC3339Local(ev.start), timeZone: tz };
+    body.end = { dateTime: toRFC3339Local(ev.end), timeZone: tz };
+  }
+  return body;
+}
+
+async function upsertEvent(calendarId, body) {
+  const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
+  try {
+    // Try insert first with stable id; if exists => 409
+    await apiFetch(base, { method: "POST", body: JSON.stringify(body) });
+    return "created";
+  } catch (e) {
+    if (e.status === 409) {
+      // Update existing
+      await apiFetch(`${base}/${encodeURIComponent(body.id)}`, { method: "PATCH", body: JSON.stringify(body) });
+      return "updated";
+    }
+    if (e.status === 401) {
+      // Token expired or needs prompt; try interactive once
+      await ensureAccessToken(true);
+      await apiFetch(base, { method: "POST", body: JSON.stringify(body) });
+      return "created";
+    }
+    throw e;
+  }
+}
+
+async function listEventsInRange(calendarId, timeMinIso, timeMaxIso) {
+  const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
+  const url = `${base}?singleEvents=true&maxResults=2500&timeMin=${encodeURIComponent(timeMinIso)}&timeMax=${encodeURIComponent(timeMaxIso)}`;
+  const res = await apiFetch(url);
+  return res.items || [];
+}
+
+async function deleteEvent(calendarId, eventId) {
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(eventId)}`;
+  await apiFetch(url, { method: "DELETE" });
+}
+
+function monthRangeFromCurrent() {
+  if (!current) throw new Error("Parse a month first.");
+  const start = new Date(current.year, current.month - 1, 1, 0, 0, 0, 0);
+  const end = new Date(current.year, current.month, 1, 0, 0, 0, 0); // first day next month
+  return { start, end };
+}
+
+// Wire buttons
+document.getElementById("clientIdBox").value = localStorage.getItem("mars_client_id") || "";
+
+document.getElementById("connectBtn").addEventListener("click", async () => {
+  document.getElementById("syncLog").textContent = "";
+  try {
+    initGoogleTokenClient();
+    logSync("Requesting Google permission…");
+    await ensureAccessToken(true);
+    logSync("Ready to sync.");
+  } catch (e) {
+    logSync("Connect failed: " + (e.message || e));
+  }
+});
+
+document.getElementById("syncBtn").addEventListener("click", async () => {
+  document.getElementById("syncLog").textContent = "";
+  try {
+    if (!current) throw new Error("Parse a month first.");
+
+    logSync("Checking Google auth…");
+    await ensureAccessToken(false);
+
+    const calName = (document.getElementById("calendarNameBox").value || "Work (MARS)").trim();
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+
+    logSync(`Using calendar: ${calName}`);
+    const calendarId = await getOrCreateCalendarIdByName(calName);
+    logSync("Calendar OK.");
+
+    const selected = current.events.filter(e => e.use);
+    logSync(`Syncing ${selected.length} selected item(s)…`);
+
+    let created = 0, updated = 0;
+    for (const ev of selected) {
+      const body = eventBodyFromParsed(ev, tz);
+      const result = await upsertEvent(calendarId, body);
+      if (result === "created") created++;
+      else updated++;
+    }
+    logSync(`Done: ${created} created, ${updated} updated.`);
+
+    // Optional pruning for this month only (keeps archive outside this month)
+    const prune = document.getElementById("pruneMissingBox").checked;
+    if (prune) {
+      const { start, end } = monthRangeFromCurrent();
+      logSync("Pruning unselected MARS events in this month…");
+      const existing = await listEventsInRange(calendarId, start.toISOString(), end.toISOString());
+
+      const keepIds = new Set(selected.map(ev => makeEventId(ev)));
+      let deleted = 0;
+
+      for (const item of existing) {
+        if (item.id && item.id.startsWith("mars-") && !keepIds.has(item.id)) {
+          await deleteEvent(calendarId, item.id);
+          deleted++;
+        }
+      }
+      logSync(`Prune done: ${deleted} deleted.`);
+    }
+
+  } catch (e) {
+    logSync("Sync failed: " + (e.message || e));
+  }
+});

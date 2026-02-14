@@ -20,6 +20,7 @@
     .muted { color: #666; }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; font-size: 12px; }
   </style>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
   <h2>MARS Paste → ICS</h2>
@@ -51,6 +52,33 @@
       <div id="summary" class="muted" style="margin-top:8px"></div>
       <div id="warnings" class="warn" style="margin-top:6px"></div>
     </div>
+
+    <div class="card">
+        <h3 style="margin:0 0 8px 0;">Google Sync</h3>
+
+        <label><strong>Google OAuth Client ID</strong></label>
+        <input id="clientIdBox" placeholder="xxxxx.apps.googleusercontent.com" />
+
+        <div style="height:8px"></div>
+
+        <label><strong>Target calendar name</strong></label>
+        <input id="calendarNameBox" value="Work (MARS)" />
+
+        <div style="margin-top:10px" class="buttons">
+            <button id="connectBtn">Connect Google</button>
+            <button id="syncBtn" class="primary">Sync selected to Google</button>
+        </div>
+
+        <div style="margin-top:8px">
+            <label>
+            <input type="checkbox" id="pruneMissingBox" />
+            Remove MARS events in this month that aren’t selected (optional)
+            </label>
+        </div>
+
+  <div id="syncLog" class="muted" style="margin-top:8px; white-space:pre-wrap"></div>
+</div>
+
 
     <div class="card">
       <div style="overflow:auto">
