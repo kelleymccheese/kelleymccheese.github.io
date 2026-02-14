@@ -2,7 +2,7 @@
    CONFIG
    ========================= */
 
-const DEFAULT_GOOGLE_OAUTH_CLIENT_ID = "641865656292-2seuocq4kjjgr028dlfhjbfmucss8q0l.apps.googleusercontent.com";
+const DEFAULT_GOOGLE_OAUTH_CLIENT_ID = "641865656292-2seuocq4kjjgr028dlfhjbfmucss8q0l.apps.googleusercontent.com.apps.googleusercontent.com";
 
 
 /* =========================
@@ -34,7 +34,7 @@ function fnv1a(str) {
   return ("00000000" + h.toString(16)).slice(-8);
 }
 
-// 16-hex using two FNV passes
+// 16 hex chars via two FNV passes
 function fnv1a16(str) {
   return fnv1a(str) + fnv1a(str + "|x");
 }
@@ -52,13 +52,11 @@ function parseIgnoreList(raw) {
 
 function isCalendarNavLine(line) {
   const s = String(line).toLowerCase();
-  // typical nav/footer phrases in this system
   return (
     (s.includes("back one month") && s.includes("previous month")) ||
     (s.includes("next month") && s.includes("forward one month")) ||
     s.includes("back one year") ||
     s.includes("forward one year") ||
-    s.includes("day\tweek\tmonth\tyear") ||
     (s === "day" || s === "week" || s === "month" || s === "year")
   );
 }
@@ -67,7 +65,7 @@ function shouldIgnore(title, ignoreRules) {
   const t = String(title || "").trim();
   if (!t) return true;
 
-  // Always ignore RDO (day off)
+  // Always ignore RDO
   if (t.toLowerCase() === "rdo") return true;
 
   // Always ignore navigation/footer content
@@ -82,7 +80,6 @@ function shouldIgnore(title, ignoreRules) {
 
 // Date helpers
 function makeDate(year, month, day) {
-  // month: 1-12
   return new Date(year, month - 1, day, 0, 0, 0, 0);
 }
 function combine(dateObj, hhmm) {
@@ -92,7 +89,6 @@ function combine(dateObj, hhmm) {
   return d;
 }
 function fmtLocalDT(dt) {
-  // floating local time for ICS: YYYYMMDDTHHMMSS
   return `${dt.getFullYear()}${pad2(dt.getMonth()+1)}${pad2(dt.getDate())}T${pad2(dt.getHours())}${pad2(dt.getMinutes())}${pad2(dt.getSeconds())}`;
 }
 function fmtDateOnly(dt) {
@@ -106,7 +102,7 @@ function toRFC3339Local(dt) {
   const hh = pad2(dt.getHours());
   const mm = pad2(dt.getMinutes());
   const ss = pad2(dt.getSeconds());
-  const offMin = -dt.getTimezoneOffset(); // minutes east of UTC
+  const offMin = -dt.getTimezoneOffset();
   const sign = offMin >= 0 ? "+" : "-";
   const offAbs = Math.abs(offMin);
   const offH = pad2(Math.floor(offAbs / 60));
@@ -118,6 +114,27 @@ function dateOnly(dt) {
   return `${dt.getFullYear()}-${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
 }
 
+// Key used for matching existing events (survives title changes)
+function matchKeyFromParsed(ev, tz) {
+  if (ev.allDay) {
+    return `D|${dateOnly(ev.start)}|${dateOnly(ev.end)}|${tz}`;
+  }
+  return `T|${toRFC3339Local(ev.start)}|${toRFC3339Local(ev.end)}|${tz}`;
+}
+
+function matchKeyFromGoogleItem(item, tz) {
+  // item.start can be {date} or {dateTime}
+  if (item.start?.date) {
+    const s = item.start.date;
+    const e = item.end?.date;
+    return `D|${s}|${e}|${tz}`;
+  }
+  const sdt = item.start?.dateTime;
+  const edt = item.end?.dateTime;
+  if (!sdt || !edt) return null;
+  return `T|${sdt}|${edt}|${tz}`;
+}
+
 
 /* =========================
    Parsing
@@ -127,17 +144,13 @@ const DAY_LINE = /^\s*(\d{1,2})\s*$/;
 const MONTH_YEAR = /\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(\d{4})\b/i;
 const ITEM_BRACKETS = /^(?<title>.+?)\[(?<range>.+?)\]\s*$/;
 
-// Overnight special format: "22:00-03-06:00"
-// Meaning: start at 22:00 on day 03, end at 06:00 on the *cell day*.
+// Overnight: "22:00-03-06:00" means start 22:00 on day 03, end 06:00 on cell day
 const OVERNIGHT = /^(?<start>\d{2}:\d{2})-(?<startDay>\d{2})-(?<end>\d{2}:\d{2})$/;
-
-// Standard format: "07:00-15:00"
 const STANDARD = /^(?<start>\d{2}:\d{2})-(?<end>\d{2}:\d{2})$/;
 
 function parseMarsPaste(text, ignoreRules) {
   const lines = text.split(/\r?\n/).map(l => l.replace(/\t/g, " ").trimEnd());
 
-  // Find month/year
   let month = null, year = null;
   for (const ln of lines) {
     const m = ln.match(MONTH_YEAR);
@@ -152,7 +165,6 @@ function parseMarsPaste(text, ignoreRules) {
   if (!month || !year) throw new Error("Couldn't find Month + Year like 'February 2026'.");
 
   const events = [];
-  const globalWarnings = [];
 
   let i = 0;
   while (i < lines.length) {
@@ -162,16 +174,12 @@ function parseMarsPaste(text, ignoreRules) {
     const cellDay = Number(dm[1]);
     const cellDate = makeDate(year, month, cellDay);
 
-    // Gather block lines until next day number line, stopping if footer/nav appears
     i++;
     const block = [];
     while (i < lines.length && !DAY_LINE.test(lines[i])) {
       const ln = lines[i].trim();
 
-      if (ln && isCalendarNavLine(ln)) {
-        // footer/nav content after the grid; stop reading this day block
-        break;
-      }
+      if (ln && isCalendarNavLine(ln)) break;
 
       if (ln) block.push(ln);
       i++;
@@ -181,12 +189,10 @@ function parseMarsPaste(text, ignoreRules) {
       const line = raw.trim();
       if (!line) continue;
 
-      // All-day entries (no brackets)
       const b = line.match(ITEM_BRACKETS);
       if (!b) {
         const title = line;
         if (shouldIgnore(title, ignoreRules)) continue;
-
         events.push({
           use: true,
           title,
@@ -201,23 +207,20 @@ function parseMarsPaste(text, ignoreRules) {
 
       const title = b.groups.title.trim();
       const range = b.groups.range.trim();
-
       if (shouldIgnore(title, ignoreRules)) continue;
 
       let warnings = [];
       let startDT = null, endDT = null;
 
-      // Overnight special format
       const om = range.match(OVERNIGHT);
       if (om) {
         const startTime = om.groups.start;
         const startDay = Number(om.groups.startDay);
         const endTime = om.groups.end;
 
-        // startDay is the actual start day-of-month; cellDay is end day-of-month
         let startDate = makeDate(year, month, startDay);
 
-        // Month boundary case: if startDay > cellDay, startDate is in previous month
+        // month boundary: startDay > cellDay means previous month
         if (startDay > cellDay) {
           const tmp = makeDate(year, month, 1);
           tmp.setMonth(tmp.getMonth() - 1);
@@ -228,12 +231,10 @@ function parseMarsPaste(text, ignoreRules) {
         endDT = combine(cellDate, endTime);
 
         if (endDT <= startDT) {
-          // Safety bump; should rarely happen if format is used correctly
           endDT = new Date(endDT.getTime() + 24*3600*1000);
           warnings.push("End <= start; bumped end +1 day (review).");
         }
       } else {
-        // Standard HH:MM-HH:MM
         const sm = range.match(STANDARD);
         if (!sm) {
           warnings.push(`Unrecognized time range: [${range}] (kept as all-day unless you edit)`);
@@ -270,7 +271,7 @@ function parseMarsPaste(text, ignoreRules) {
     }
   }
 
-  return { month, year, events, globalWarnings };
+  return { month, year, events };
 }
 
 
@@ -307,7 +308,6 @@ function toICS(events) {
       lines.push(`DTSTART;VALUE=DATE:${fmtDateOnly(ev.start)}`);
       lines.push(`DTEND;VALUE=DATE:${fmtDateOnly(ev.end)}`);
     } else {
-      // Floating local times (Google imports using calendar timezone)
       lines.push(`DTSTART:${fmtLocalDT(ev.start)}`);
       lines.push(`DTEND:${fmtLocalDT(ev.end)}`);
     }
@@ -339,11 +339,9 @@ function render() {
   document.getElementById("warnings").textContent =
     warnCount ? `Warnings on ${warnCount} event(s) — review before syncing.` : "";
 
-  for (let idx = 0; idx < events.length; idx++) {
-    const ev = events[idx];
+  for (const ev of events) {
     const tr = document.createElement("tr");
 
-    // Use checkbox
     const tdUse = document.createElement("td");
     const cb = document.createElement("input");
     cb.type = "checkbox";
@@ -352,7 +350,6 @@ function render() {
     tdUse.appendChild(cb);
     tr.appendChild(tdUse);
 
-    // Date/Time
     const tdDT = document.createElement("td");
     if (ev.allDay) {
       tdDT.textContent = `${ev.start.getFullYear()}-${pad2(ev.start.getMonth()+1)}-${pad2(ev.start.getDate())} (all day)`;
@@ -364,7 +361,6 @@ function render() {
     }
     tr.appendChild(tdDT);
 
-    // Title editable
     const tdTitle = document.createElement("td");
     const inp = document.createElement("input");
     inp.value = ev.title;
@@ -372,7 +368,6 @@ function render() {
     tdTitle.appendChild(inp);
     tr.appendChild(tdTitle);
 
-    // Warnings
     const tdWarn = document.createElement("td");
     tdWarn.className = "warn";
     tdWarn.textContent = (ev.warnings || []).join(" | ");
@@ -386,13 +381,12 @@ function clearSyncLog() {
   const el = document.getElementById("syncLog");
   el.textContent = "";
 }
-
 function logSync(msg) {
   const el = document.getElementById("syncLog");
   el.textContent = (el.textContent ? el.textContent + "\n" : "") + msg;
 }
 
-// default ignore box content (RDO is auto-ignored anyway)
+// default ignore
 document.getElementById("ignoreBox").value = "NH CLASS";
 
 document.getElementById("parseBtn").addEventListener("click", () => {
@@ -432,7 +426,7 @@ document.getElementById("downloadBtn").addEventListener("click", () => {
 
 
 /* =========================
-   Google Sync (Phase 2)
+   Google Sync
    ========================= */
 
 let tokenClient = null;
@@ -440,7 +434,6 @@ let accessToken = null;
 let accessTokenExpiryMs = 0;
 
 function getClientId() {
-  // hidden input exists; we fill it from the constant
   const box = document.getElementById("clientIdBox");
   let v = (box.value || "").trim();
   if (!v) v = DEFAULT_GOOGLE_OAUTH_CLIENT_ID;
@@ -449,7 +442,6 @@ function getClientId() {
     throw new Error("Set DEFAULT_GOOGLE_OAUTH_CLIENT_ID in app.js to your real OAuth Client ID.");
   }
 
-  // keep it in the hidden input for internal use
   box.value = v;
   return v;
 }
@@ -470,7 +462,7 @@ function initGoogleTokenClient() {
       }
       accessToken = resp.access_token;
       const expiresIn = Number(resp.expires_in || 3600);
-      accessTokenExpiryMs = Date.now() + (expiresIn * 1000) - 30_000; // 30s buffer
+      accessTokenExpiryMs = Date.now() + (expiresIn * 1000) - 30_000;
       logSync("Connected.");
     }
   });
@@ -512,10 +504,10 @@ async function apiFetch(url, options = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-// Google event IDs must be lowercase base32hex [a-v0-9]; hex [0-9a-f] is OK.
-// No hyphens.
-function makeEventId(ev) {
-  const key = `${ev.title}|${ev.allDay ? dateOnly(ev.start) : toRFC3339Local(ev.start)}|${ev.allDay ? "" : toRFC3339Local(ev.end)}|${ev.raw}`;
+// Event IDs must be lowercase base32hex [a-v0-9]; hex [0-9a-f] is OK; no hyphens.
+function makeEventId(ev, tz) {
+  // IMPORTANT: exclude title so title changes can be patched without changing identity.
+  const key = matchKeyFromParsed(ev, tz) + "|" + ev.allDay;
   return `mars${fnv1a16(key)}`;
 }
 
@@ -531,16 +523,18 @@ async function getOrCreateCalendarIdByName(name) {
   return created.id;
 }
 
-function eventBodyFromParsed(ev, tz) {
+function eventPatchBodyFromParsed(ev, tz) {
+  const mk = matchKeyFromParsed(ev, tz);
+
   const body = {
-    id: makeEventId(ev),
     summary: ev.title,
-    description: `RAW: ${ev.raw}${ev.warnings?.length ? "\nWARNINGS: " + ev.warnings.join(" | ") : ""}`
+    description: `RAW: ${ev.raw}${ev.warnings?.length ? "\nWARNINGS: " + ev.warnings.join(" | ") : ""}`,
+    extendedProperties: { private: { marsMatchKey: mk } }
   };
 
   if (ev.allDay) {
     body.start = { date: dateOnly(ev.start) };
-    body.end = { date: dateOnly(ev.end) }; // end is non-inclusive
+    body.end = { date: dateOnly(ev.end) };
   } else {
     body.start = { dateTime: toRFC3339Local(ev.start), timeZone: tz };
     body.end = { dateTime: toRFC3339Local(ev.end), timeZone: tz };
@@ -548,23 +542,16 @@ function eventBodyFromParsed(ev, tz) {
   return body;
 }
 
-async function upsertEvent(calendarId, body) {
+async function insertEvent(calendarId, eventId, body) {
   const base = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`;
-  try {
-    await apiFetch(base, { method: "POST", body: JSON.stringify(body) });
-    return "created";
-  } catch (e) {
-    if (e.status === 409) {
-      await apiFetch(`${base}/${encodeURIComponent(body.id)}`, { method: "PATCH", body: JSON.stringify(body) });
-      return "updated";
-    }
-    if (e.status === 401) {
-      await ensureAccessToken(true);
-      await apiFetch(base, { method: "POST", body: JSON.stringify(body) });
-      return "created";
-    }
-    throw e;
-  }
+  // insert allows "id" in resource; body here is PATCH-style, so add id
+  const insertBody = { id: eventId, ...body };
+  await apiFetch(base, { method: "POST", body: JSON.stringify(insertBody) });
+}
+
+async function patchEvent(calendarId, googleEventId, body) {
+  const url = `https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events/${encodeURIComponent(googleEventId)}`;
+  await apiFetch(url, { method: "PATCH", body: JSON.stringify(body) });
 }
 
 async function listEventsInRange(calendarId, timeMinIso, timeMaxIso) {
@@ -594,58 +581,33 @@ async function deleteEvent(calendarId, eventId) {
 function monthRangeFromCurrent() {
   if (!current) throw new Error("Parse a month first.");
   const start = new Date(current.year, current.month - 1, 1, 0, 0, 0, 0);
-  const end = new Date(current.year, current.month, 1, 0, 0, 0, 0); // first day next month
+  const end = new Date(current.year, current.month, 1, 0, 0, 0, 0);
   return { start, end };
 }
 
-/**
- * Decide overwrite window by comparing TODAY vs the pasted month/year.
- * - Past month: no overwrite deletion (archive-friendly); sync whole month.
- * - Current month: overwrite from (today midnight - 1 day) within month (handles overnight).
- * - Future month: overwrite whole month (with a 1-day buffer before monthStart to catch overnight that starts prev day).
- */
-function computeSyncWindowForPastedMonth(monthStart, monthEnd) {
-  const today = new Date();
-  const todayMidnight = new Date(today.getTime());
-  todayMidnight.setHours(0, 0, 0, 0);
-
-  const isPast = monthEnd <= todayMidnight;
-  const isFuture = monthStart > todayMidnight;
-  const isCurrent = !isPast && !isFuture;
-
-  if (isPast) {
-    return {
-      label: "past-month",
-      deleteFrom: null,
-      syncFrom: monthStart,
-      syncTo: monthEnd
-    };
-  }
-
-  if (isFuture) {
-    const deleteFrom = new Date(monthStart.getTime());
-    deleteFrom.setDate(deleteFrom.getDate() - 1); // buffer for overnight that starts previous day
-    return {
-      label: "future-month",
-      deleteFrom,
-      syncFrom: deleteFrom,
-      syncTo: monthEnd
-    };
-  }
-
-  // Current month
-  const from = new Date(todayMidnight.getTime());
-  from.setDate(from.getDate() - 1); // yesterday midnight
-  const syncFrom = new Date(Math.max(from.getTime(), monthStart.getTime()));
-  return {
-    label: "current-month",
-    deleteFrom: syncFrom,
-    syncFrom,
-    syncTo: monthEnd
-  };
+function addDays(d, n) {
+  const x = new Date(d.getTime());
+  x.setDate(x.getDate() + n);
+  return x;
 }
 
-// Buttons
+// Build an index of existing MARS events by matchKey so we can patch even if older IDs differ.
+function buildExistingIndex(items, tz) {
+  const map = new Map(); // key -> [eventId,...]
+  for (const it of items) {
+    if (!it?.id || !String(it.id).startsWith("mars")) continue;
+
+    // Prefer stored match key if present
+    const stored = it.extendedProperties?.private?.marsMatchKey;
+    const key = stored || matchKeyFromGoogleItem(it, tz);
+    if (!key) continue;
+
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(it.id);
+  }
+  return map;
+}
+
 document.getElementById("connectBtn").addEventListener("click", async () => {
   clearSyncLog();
   try {
@@ -673,48 +635,84 @@ document.getElementById("syncBtn").addEventListener("click", async () => {
     const calendarId = await getOrCreateCalendarIdByName(calName);
     logSync("Calendar OK.");
 
+    // Compute ranges for THIS pasted month/year and compare to actual now
     const { start: monthStart, end: monthEnd } = monthRangeFromCurrent();
-    const window = computeSyncWindowForPastedMonth(monthStart, monthEnd);
+    const syncRangeStart = addDays(monthStart, -1); // buffer for overnight starting previous day
+    const syncRangeEnd = monthEnd;
 
-    const overwrite = document.getElementById("overwriteBox").checked;
+    const now = new Date();
 
-    // Explain what we’re doing (helps when pasting different months/years)
-    logSync(`Pasted month detected: ${current.year}-${pad2(current.month)}. Window mode: ${window.label}.`);
-    logSync(`Sync window: ${window.syncFrom.toISOString().slice(0,10)} → ${window.syncTo.toISOString().slice(0,10)} (end exclusive)`);
+    logSync(`Now: ${now.toISOString()}`);
+    logSync(`Pasted month: ${current.year}-${pad2(current.month)}`);
+    logSync(`Month range: ${monthStart.toISOString().slice(0,10)} → ${monthEnd.toISOString().slice(0,10)} (end exclusive)`);
+    logSync(`Sync range (w/ buffer): ${syncRangeStart.toISOString().slice(0,10)} → ${syncRangeEnd.toISOString().slice(0,10)} (end exclusive)`);
 
-    // Overwrite future window only when month is current or future
-    if (overwrite && window.deleteFrom) {
-      logSync(`Overwriting MARS events from ${window.deleteFrom.toISOString().slice(0,10)} → end of month…`);
-      const existing = await listEventsInRange(calendarId, window.deleteFrom.toISOString(), window.syncTo.toISOString());
+    const selected = current.events
+      .filter(e => e.use)
+      .filter(e => e.end > syncRangeStart && e.start < syncRangeEnd);
 
-      let deleted = 0;
-      for (const item of existing) {
-        if (item.id && item.id.startsWith("mars")) {
-          await deleteEvent(calendarId, item.id);
+    // FUTURE behavior: delete everything in the future (by start time) within sync range, then recreate
+    const futureFrom = new Date(Math.max(now.getTime(), syncRangeStart.getTime()));
+    let deleted = 0;
+
+    if (futureFrom < syncRangeEnd) {
+      logSync(`Deleting future MARS events (start > now) from ${futureFrom.toISOString()} → ${syncRangeEnd.toISOString()} …`);
+      const futureItems = await listEventsInRange(calendarId, futureFrom.toISOString(), syncRangeEnd.toISOString());
+      for (const it of futureItems) {
+        if (it?.id && String(it.id).startsWith("mars")) {
+          await deleteEvent(calendarId, it.id);
           deleted++;
         }
       }
-      logSync(`Deleted ${deleted} existing MARS event(s) in overwrite window.`);
-    } else if (overwrite && !window.deleteFrom) {
-      logSync("Pasted month is in the past; overwrite delete skipped to preserve archive.");
+      logSync(`Deleted ${deleted} future MARS event(s).`);
+    } else {
+      logSync("No future window inside this pasted month; skipping future delete.");
     }
 
-    // Sync selected items that overlap the sync window
-    const selected = current.events
-      .filter(e => e.use)
-      .filter(e => e.end > window.syncFrom && e.start < window.syncTo);
+    // Build index of existing PAST/CURRENT MARS events so we can patch them even if IDs differ
+    const pastTo = new Date(Math.min(now.getTime(), syncRangeEnd.getTime()));
+    let existingIndex = new Map();
 
-    logSync(`Syncing ${selected.length} selected item(s)…`);
+    if (syncRangeStart < pastTo) {
+      logSync(`Indexing existing past/current MARS events from ${syncRangeStart.toISOString()} → ${pastTo.toISOString()} …`);
+      const pastItems = await listEventsInRange(calendarId, syncRangeStart.toISOString(), pastTo.toISOString());
+      existingIndex = buildExistingIndex(pastItems, tz);
+      logSync(`Indexed ${pastItems.filter(it => it?.id && String(it.id).startsWith("mars")).length} MARS event(s) in past/current window.`);
+    }
 
-    let created = 0, updated = 0;
+    // Apply: past/current => PATCH existing if match found; else INSERT
+    //        future       => INSERT (we deleted all future ones first)
+    let patched = 0, created = 0;
+
+    // Sort to make behavior consistent
+    selected.sort((a,b) => a.start - b.start);
+
     for (const ev of selected) {
-      const body = eventBodyFromParsed(ev, tz);
-      const result = await upsertEvent(calendarId, body);
-      if (result === "created") created++;
-      else updated++;
+      const isFuture = ev.start.getTime() > now.getTime(); // “happening now” counts as past/current
+      const mk = matchKeyFromParsed(ev, tz);
+      const patchBody = eventPatchBodyFromParsed(ev, tz);
+
+      if (!isFuture) {
+        const candidates = existingIndex.get(mk);
+        if (candidates && candidates.length) {
+          const existingId = candidates.shift(); // consume one
+          await patchEvent(calendarId, existingId, patchBody);
+          patched++;
+          continue;
+        }
+        // no match => create new archival entry
+        const newId = makeEventId(ev, tz);
+        await insertEvent(calendarId, newId, patchBody);
+        created++;
+      } else {
+        // future => recreate
+        const newId = makeEventId(ev, tz);
+        await insertEvent(calendarId, newId, patchBody);
+        created++;
+      }
     }
 
-    logSync(`Done: ${created} created, ${updated} updated.`);
+    logSync(`Done. Patched (past/current): ${patched}. Created (new/recreated): ${created}. Future deleted: ${deleted}.`);
   } catch (e) {
     logSync("Sync failed: " + (e.message || e));
   }

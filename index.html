@@ -18,7 +18,6 @@
     .buttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     button { padding: 10px 12px; border-radius: 8px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
     button.primary { background: #1f6feb; color: white; border-color: #1f6feb; }
-    button.danger { background: #ffecec; border-color: #ffb3b3; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }
     .warn { color: #8a5a00; }
@@ -34,7 +33,7 @@
     No work-site login is stored anywhere.
   </p>
 
-  <!-- Hidden client id input (not shown). App.js fills it from the constant. -->
+  <!-- Hidden client id input (not shown). app.js fills it from the constant. -->
   <input id="clientIdBox" type="hidden" />
 
   <div class="row">
@@ -42,7 +41,7 @@
       <label><strong>Paste schedule text</strong></label>
       <textarea id="pasteBox" placeholder="Paste the month text here..."></textarea>
       <div class="muted small" style="margin-top:6px">
-        Tip: You can paste one month at a time. The parser looks for the first “Month YYYY” and the day blocks.
+        Tip: Paste one month at a time. The parser looks for the first “Month YYYY” and the day blocks.
       </div>
     </div>
 
@@ -77,13 +76,6 @@
         <button id="syncBtn" class="primary">Sync selected to Google</button>
       </div>
 
-      <div style="margin-top:8px">
-        <label>
-          <input type="checkbox" id="overwriteBox" checked />
-          Overwrite future for this pasted month (delete existing MARS events in the future window, then recreate)
-        </label>
-      </div>
-
       <div id="syncLog" class="muted" style="margin-top:8px; white-space:pre-wrap"></div>
     </div>
 
@@ -106,7 +98,6 @@
 
   <script src="app.js"></script>
   <script>
-    // Register service worker (PWA offline) when served from https or localhost
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
     }
