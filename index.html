@@ -3,42 +3,55 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MARS Paste → ICS</title>
+  <title>MARS Paste → ICS / Google Sync</title>
   <link rel="manifest" href="manifest.json" />
+
+  <!-- Google Identity Services (OAuth in-browser, no secrets) -->
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+
   <style>
     body { font-family: system-ui, Arial, sans-serif; margin: 16px; line-height: 1.35; }
     textarea, input { width: 100%; box-sizing: border-box; }
     textarea { min-height: 160px; }
     .row { display: grid; grid-template-columns: 1fr; gap: 12px; }
     .card { border: 1px solid #ddd; border-radius: 10px; padding: 12px; }
-    .buttons { display: flex; gap: 8px; flex-wrap: wrap; }
+    .buttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     button { padding: 10px 12px; border-radius: 8px; border: 1px solid #ccc; background: #f7f7f7; cursor: pointer; }
     button.primary { background: #1f6feb; color: white; border-color: #1f6feb; }
+    button.danger { background: #ffecec; border-color: #ffb3b3; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }
     .warn { color: #8a5a00; }
     .muted { color: #666; }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; font-size: 12px; }
+    .small { font-size: 12px; }
   </style>
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
-  <h2>MARS Paste → ICS</h2>
+  <h2>MARS Paste → ICS / Google Sync</h2>
   <p class="muted">
-    Paste one month of schedule text, review what it parses, and download an ICS to import or sync.
+    Log into your work site normally (2FA as usual), copy the month view text, paste here, review, then export or sync.
+    No work-site login is stored anywhere.
   </p>
+
+  <!-- Hidden client id input (not shown). App.js fills it from the constant. -->
+  <input id="clientIdBox" type="hidden" />
 
   <div class="row">
     <div class="card">
       <label><strong>Paste schedule text</strong></label>
       <textarea id="pasteBox" placeholder="Paste the month text here..."></textarea>
+      <div class="muted small" style="margin-top:6px">
+        Tip: You can paste one month at a time. The parser looks for the first “Month YYYY” and the day blocks.
+      </div>
     </div>
 
     <div class="card">
       <label><strong>Ignore items containing (one per line)</strong></label>
-      <textarea id="ignoreBox" placeholder="RDO&#10;NH CLASS"></textarea>
-      <div class="muted" style="margin-top:6px">
-        Tip: simple substring match (case-insensitive). Put <span class="pill">/regex/</span> to use a regular expression.
+      <textarea id="ignoreBox" placeholder="NH CLASS"></textarea>
+      <div class="muted small" style="margin-top:6px">
+        Substring match (case-insensitive). Put <span class="pill">/regex/</span> to use a regular expression.
+        <br/>Note: <span class="pill">RDO</span> is always ignored automatically.
       </div>
     </div>
 
@@ -54,31 +67,25 @@
     </div>
 
     <div class="card">
-        <h3 style="margin:0 0 8px 0;">Google Sync</h3>
+      <h3 style="margin:0 0 8px 0;">Google Sync</h3>
 
-        <label><strong>Google OAuth Client ID</strong></label>
-        <input id="clientIdBox" placeholder="xxxxx.apps.googleusercontent.com" />
+      <label><strong>Target calendar name</strong></label>
+      <input id="calendarNameBox" value="Work (MARS)" />
 
-        <div style="height:8px"></div>
+      <div style="margin-top:10px" class="buttons">
+        <button id="connectBtn">Connect Google</button>
+        <button id="syncBtn" class="primary">Sync selected to Google</button>
+      </div>
 
-        <label><strong>Target calendar name</strong></label>
-        <input id="calendarNameBox" value="Work (MARS)" />
+      <div style="margin-top:8px">
+        <label>
+          <input type="checkbox" id="overwriteBox" checked />
+          Overwrite future for this pasted month (delete existing MARS events in the future window, then recreate)
+        </label>
+      </div>
 
-        <div style="margin-top:10px" class="buttons">
-            <button id="connectBtn">Connect Google</button>
-            <button id="syncBtn" class="primary">Sync selected to Google</button>
-        </div>
-
-        <div style="margin-top:8px">
-            <label>
-            <input type="checkbox" id="pruneMissingBox" />
-            Remove MARS events in this month that aren’t selected (optional)
-            </label>
-        </div>
-
-  <div id="syncLog" class="muted" style="margin-top:8px; white-space:pre-wrap"></div>
-</div>
-
+      <div id="syncLog" class="muted" style="margin-top:8px; white-space:pre-wrap"></div>
+    </div>
 
     <div class="card">
       <div style="overflow:auto">
