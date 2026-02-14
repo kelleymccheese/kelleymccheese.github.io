@@ -1,16 +1,14 @@
 /* =========================
    MARS Paste → ICS + Google Sync
-   Clean rebuild (no work-login, no secrets stored)
    ========================= */
-
 (() => {
   "use strict";
 
   /* ====== CONFIG ====== */
-  const GOOGLE_OAUTH_CLIENT_ID = "641865656292-2seuocq4kjjgr028dlfhjbfmucss8q0l.apps.googleusercontent.com";
+  const TZ = "America/Chicago";
+  const GOOGLE_OAUTH_CLIENT_ID = "P641865656292-2seuocq4kjjgr028dlfhjbfmucss8q0l.apps.googleusercontent.com";
   const GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar";
-
-  const DEFAULT_IGNORE_TEXT = "NH CLASS";
+  const DEFAULT_IGNORE_TEXT = ""; //RDO is always ignored
 
   /* ====== DOM ====== */
   const $ = (id) => document.getElementById(id);
@@ -30,31 +28,79 @@
     log: $("syncLog"),
   };
 
-  /* ====== SMALL UTILS ====== */
-  const pad2 = (n) => String(n).padStart(2, "0");
-
+  /* ====== LOG ====== */
   function log(msg) {
     els.log.textContent = (els.log.textContent ? els.log.textContent + "\n" : "") + msg;
   }
   function clearLog() { els.log.textContent = ""; }
 
-  function dateOnly(d) {
-    return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  /* ====== SMALL UTILS ====== */
+  const pad2 = (n) => String(n).padStart(2, "0");
+
+  // Calendar-safe YMD helper using UTC math (no DST surprises)
+  function ymd(y, m, d) { return { y, m, d }; }
+  function ymdToStr(o) { return `${o.y}-${pad2(o.m)}-${pad2(o.d)}`; }
+  function ymdAddDays(o, delta) {
+    const dt = new Date(Date.UTC(o.y, o.m - 1, o.d + delta));
+    return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: dt.getUTCDate() };
   }
-  function hm(d) {
-    return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  function monthStartYMD(year, month) { return { y: year, m: month, d: 1 }; }
+  function monthEndYMD(year, month) {
+    const dt = new Date(Date.UTC(year, month - 1, 1));
+    dt.setUTCMonth(dt.getUTCMonth() + 1);
+    return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: 1 }; // first of next month
   }
-  function addDays(d, n) {
-    const x = new Date(d.getTime());
-    x.setDate(x.getDate() + n);
-    return x;
+
+  // Intl formatter for getting timezone-aware parts
+  const dtfParts = new Intl.DateTimeFormat("en-US", {
+    timeZone: TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  });
+
+  function partsInTZ(date) {
+    function fmtCentral(date) {
+        const p = partsInTZ(date);
+        return `${p.y}-${pad2(p.m)}-${pad2(p.d)} ${pad2(p.hh)}:${pad2(p.mm)}:${pad2(p.ss)} (${TZ})`;
+    }
+    const parts = dtfParts.formatToParts(date);
+    const out = {};
+    for (const p of parts) {
+      if (p.type === "year") out.y = Number(p.value);
+      if (p.type === "month") out.m = Number(p.value);
+      if (p.type === "day") out.d = Number(p.value);
+      if (p.type === "hour") out.hh = Number(p.value);
+      if (p.type === "minute") out.mm = Number(p.value);
+      if (p.type === "second") out.ss = Number(p.value);
+    }
+    return out;
   }
-  function makeDate(y, m, day) { return new Date(y, m - 1, day, 0, 0, 0, 0); }
-  function combine(dateObj, hhmm) {
-    const [h, m] = hhmm.split(":").map(Number);
-    const d = new Date(dateObj.getTime());
-    d.setHours(h, m, 0, 0);
-    return d;
+
+  // Offset of TZ relative to UTC at timestamp ts (ms): e.g. -21600000 for CST
+  function tzOffsetMs(ts) {
+    const p = partsInTZ(new Date(ts));
+    const asUTC = Date.UTC(p.y, p.m - 1, p.d, p.hh, p.mm, p.ss);
+    return asUTC - ts;
+  }
+
+  // Convert a wall-time in TZ to a real Date (UTC instant), independent of device timezone.
+  function zonedWallTimeToDate(y, m, d, hh, mm, ss = 0) {
+    const utcGuess = Date.UTC(y, m - 1, d, hh, mm, ss);
+    const off1 = tzOffsetMs(utcGuess);
+    let ts = utcGuess - off1;
+    const off2 = tzOffsetMs(ts);
+    if (off2 !== off1) ts = utcGuess - off2; // one refinement handles DST boundaries
+    return new Date(ts);
+  }
+
+  // Central “YYYY-MM-DDTHH:MM:SS” string for Google (no offset; timeZone provided separately)
+  function rfc3339LocalStr(ymdObj, hmStr) {
+    return `${ymdToStr(ymdObj)}T${hmStr}:00`;
   }
 
   function icsEscape(s) {
@@ -64,13 +110,18 @@
       .replace(/,/g, "\\,")
       .replace(/\r?\n/g, "\\n");
   }
-  function fmtICSLocalDT(dt) {
-    return `${dt.getFullYear()}${pad2(dt.getMonth()+1)}${pad2(dt.getDate())}T${pad2(dt.getHours())}${pad2(dt.getMinutes())}${pad2(dt.getSeconds())}`;
-  }
-  function fmtICSDate(dt) {
-    return `${dt.getFullYear()}${pad2(dt.getMonth()+1)}${pad2(dt.getDate())}`;
+
+  function fmtICSLocalDT(ymdObj, hmStr) {
+    // ICS local DT (floating); we keep it as Central wall time
+    const [hh, mm] = hmStr.split(":").map(Number);
+    return `${ymdObj.y}${pad2(ymdObj.m)}${pad2(ymdObj.d)}T${pad2(hh)}${pad2(mm)}00`;
   }
 
+  function fmtICSDate(ymdObj) {
+    return `${ymdObj.y}${pad2(ymdObj.m)}${pad2(ymdObj.d)}`;
+  }
+
+  /* ====== IGNORE RULES ====== */
   function parseIgnoreRules(raw) {
     const lines = String(raw || "")
       .split(/\r?\n/)
@@ -99,8 +150,8 @@
   function shouldIgnoreTitle(title, rules) {
     const t = String(title || "").trim();
     if (!t) return true;
-    if (t.toLowerCase() === "rdo") return true;
-    if (isCalendarNavLine(t)) return true;
+    if (t.toLowerCase() === "rdo") return true;    // always ignore day off
+    if (isCalendarNavLine(t)) return true;         // ignore footer/nav noise
 
     const lower = t.toLowerCase();
     return rules.some(r => (r.type === "regex" ? r.re.test(t) : lower.includes(r.sub)));
@@ -129,15 +180,15 @@
     return null;
   }
 
-  // Creates a stable matchKey (wall-time based, timezone-proof) + occurrence number for duplicates
+  // Stable match key: wall time in Central + source title + occurrence
   function makeMatchKey(ev) {
     const src = String(ev.sourceTitle || "").replaceAll("|", " ").trim();
     const occ = ev.occ || 1;
 
     if (ev.allDay) {
-      return `D|${dateOnly(ev.start)}|${dateOnly(ev.end)}|${src}|${occ}`;
+      return `D|${ymdToStr(ev.startYMD)}|${ymdToStr(ev.endYMD)}|${src}|${occ}`;
     }
-    return `T|${dateOnly(ev.start)}|${hm(ev.start)}|${dateOnly(ev.end)}|${hm(ev.end)}|${src}|${occ}`;
+    return `T|${ymdToStr(ev.startYMD)}|${ev.startHM}|${ymdToStr(ev.endYMD)}|${ev.endHM}|${src}|${occ}`;
   }
 
   function parse(text, ignoreRules) {
@@ -158,9 +209,8 @@
       if (!dm) { i++; continue; }
 
       const cellDay = Number(dm[1]);
-      const cellDate = makeDate(year, month, cellDay);
+      const cellYMD = ymd(year, month, cellDay);
 
-      // collect lines in the "cell block"
       i++;
       const block = [];
       while (i < lines.length && !RX_DAY.test(lines[i])) {
@@ -174,15 +224,19 @@
         const line = raw.trim();
         if (!line) continue;
 
-        // No [..] => all-day label
         const mItem = line.match(RX_ITEM);
+
+        // No brackets => all-day label
         if (!mItem) {
           const title = line;
           if (shouldIgnoreTitle(title, ignoreRules)) continue;
 
-          const start = cellDate;
-          const end = addDays(cellDate, 1);
-          const baseSig = `A|${title}|${start.getTime()}|${end.getTime()}`;
+          const startYMD = cellYMD;
+          const endYMD = ymdAddDays(cellYMD, 1);
+          const start = zonedWallTimeToDate(startYMD.y, startYMD.m, startYMD.d, 0, 0, 0);
+          const end = zonedWallTimeToDate(endYMD.y, endYMD.m, endYMD.d, 0, 0, 0);
+
+          const baseSig = `A|${title}|${ymdToStr(startYMD)}|${ymdToStr(endYMD)}`;
           const occ = (occMap.get(baseSig) || 0) + 1;
           occMap.set(baseSig, occ);
 
@@ -192,6 +246,8 @@
             sourceTitle: title,
             occ,
             allDay: true,
+            startYMD,
+            endYMD,
             start,
             end,
             raw: line,
@@ -204,47 +260,62 @@
         const range = mItem.groups.range.trim();
         if (shouldIgnoreTitle(title, ignoreRules)) continue;
 
-        let startDT = null, endDT = null;
         const warnings = [];
+        let startYMD = null, endYMD = null;
+        let startHM = null, endHM = null;
+        let start = null, end = null;
 
         const mOver = range.match(RX_OVERNIGHT);
         if (mOver) {
-          const startTime = mOver.groups.start;
+          startHM = mOver.groups.start;
+          endHM = mOver.groups.end;
           const startDay = Number(mOver.groups.startDay);
-          const endTime = mOver.groups.end;
 
-          let startDate = makeDate(year, month, startDay);
-          // if startDay > cellDay, the start is in previous month
+          // start day can be in previous month (if startDay > cellDay)
           if (startDay > cellDay) {
-            const tmp = makeDate(year, month, 1);
-            tmp.setMonth(tmp.getMonth() - 1);
-            startDate = makeDate(tmp.getFullYear(), tmp.getMonth() + 1, startDay);
+            const prev = new Date(Date.UTC(year, month - 1, 1));
+            prev.setUTCMonth(prev.getUTCMonth() - 1);
+            startYMD = ymd(prev.getUTCFullYear(), prev.getUTCMonth() + 1, startDay);
+          } else {
+            startYMD = ymd(year, month, startDay);
           }
 
-          startDT = combine(startDate, startTime);
-          endDT = combine(cellDate, endTime);
+          endYMD = cellYMD;
 
-          if (endDT <= startDT) {
-            endDT = addDays(endDT, 1);
+          const [sh, sm] = startHM.split(":").map(Number);
+          const [eh, em] = endHM.split(":").map(Number);
+
+          start = zonedWallTimeToDate(startYMD.y, startYMD.m, startYMD.d, sh, sm, 0);
+          end = zonedWallTimeToDate(endYMD.y, endYMD.m, endYMD.d, eh, em, 0);
+
+          if (end <= start) {
+            endYMD = ymdAddDays(endYMD, 1);
+            end = zonedWallTimeToDate(endYMD.y, endYMD.m, endYMD.d, eh, em, 0);
             warnings.push("End <= start; bumped end +1 day (review).");
           }
         } else {
           const mStd = range.match(RX_STD);
           if (!mStd) {
-            // fallback: treat as all-day
-            const start = cellDate;
-            const end = addDays(cellDate, 1);
-            const baseSig = `A|${title}|${start.getTime()}|${end.getTime()}`;
+            // fallback: all-day
+            warnings.push(`Unrecognized time range: [${range}] (kept as all-day unless you edit)`);
+
+            startYMD = cellYMD;
+            endYMD = ymdAddDays(cellYMD, 1);
+            start = zonedWallTimeToDate(startYMD.y, startYMD.m, startYMD.d, 0, 0, 0);
+            end = zonedWallTimeToDate(endYMD.y, endYMD.m, endYMD.d, 0, 0, 0);
+
+            const baseSig = `A|${title}|${ymdToStr(startYMD)}|${ymdToStr(endYMD)}`;
             const occ = (occMap.get(baseSig) || 0) + 1;
             occMap.set(baseSig, occ);
 
-            warnings.push(`Unrecognized time range: [${range}] (kept as all-day unless you edit)`);
             events.push({
               use: true,
               title,
               sourceTitle: title,
               occ,
               allDay: true,
+              startYMD,
+              endYMD,
               start,
               end,
               raw: line,
@@ -253,15 +324,25 @@
             continue;
           }
 
-          startDT = combine(cellDate, mStd.groups.start);
-          endDT = combine(cellDate, mStd.groups.end);
-          if (endDT <= startDT) {
-            endDT = addDays(endDT, 1);
+          startHM = mStd.groups.start;
+          endHM = mStd.groups.end;
+          startYMD = cellYMD;
+          endYMD = cellYMD;
+
+          const [sh, sm] = startHM.split(":").map(Number);
+          const [eh, em] = endHM.split(":").map(Number);
+
+          start = zonedWallTimeToDate(startYMD.y, startYMD.m, startYMD.d, sh, sm, 0);
+          end = zonedWallTimeToDate(endYMD.y, endYMD.m, endYMD.d, eh, em, 0);
+
+          if (end <= start) {
+            endYMD = ymdAddDays(endYMD, 1);
+            end = zonedWallTimeToDate(endYMD.y, endYMD.m, endYMD.d, eh, em, 0);
             warnings.push("Crosses midnight (end bumped +1 day).");
           }
         }
 
-        const baseSig = `T|${title}|${startDT.getTime()}|${endDT.getTime()}`;
+        const baseSig = `T|${title}|${ymdToStr(startYMD)}|${startHM}|${ymdToStr(endYMD)}|${endHM}`;
         const occ = (occMap.get(baseSig) || 0) + 1;
         occMap.set(baseSig, occ);
 
@@ -271,8 +352,12 @@
           sourceTitle: title,
           occ,
           allDay: false,
-          start: startDT,
-          end: endDT,
+          startYMD,
+          endYMD,
+          startHM,
+          endHM,
+          start,
+          end,
           raw: line,
           warnings
         });
@@ -284,10 +369,7 @@
 
   /* ====== ICS ====== */
   function toICS(events) {
-    const dtstampZ = new Date().toISOString()
-      .replace(/[-:]/g, "")
-      .replace(/\.\d{3}Z$/, "Z");
-
+    const dtstampZ = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
     const out = [
       "BEGIN:VCALENDAR",
       "VERSION:2.0",
@@ -296,9 +378,7 @@
     ];
 
     for (const ev of events.filter(e => e.use)) {
-      // UID stable enough for exports; not used for Google sync
       const uid = `mars-${dtstampZ}-${Math.random().toString(16).slice(2)}@local`;
-
       out.push("BEGIN:VEVENT");
       out.push(`UID:${uid}`);
       out.push(`DTSTAMP:${dtstampZ}`);
@@ -308,17 +388,15 @@
         ev.warnings?.length ? ("WARNINGS: " + ev.warnings.join(" | ")) : "",
         "RAW: " + ev.raw
       ].filter(Boolean).join("\n");
-
       out.push(`DESCRIPTION:${icsEscape(desc)}`);
 
       if (ev.allDay) {
-        out.push(`DTSTART;VALUE=DATE:${fmtICSDate(ev.start)}`);
-        out.push(`DTEND;VALUE=DATE:${fmtICSDate(ev.end)}`); // end-exclusive
+        out.push(`DTSTART;VALUE=DATE:${fmtICSDate(ev.startYMD)}`);
+        out.push(`DTEND;VALUE=DATE:${fmtICSDate(ev.endYMD)}`); // end-exclusive
       } else {
-        out.push(`DTSTART:${fmtICSLocalDT(ev.start)}`);
-        out.push(`DTEND:${fmtICSLocalDT(ev.end)}`);
+        out.push(`DTSTART:${fmtICSLocalDT(ev.startYMD, ev.startHM)}`);
+        out.push(`DTEND:${fmtICSLocalDT(ev.endYMD, ev.endHM)}`);
       }
-
       out.push("END:VEVENT");
     }
 
@@ -326,7 +404,7 @@
     return out.join("\r\n") + "\r\n";
   }
 
-  /* ====== UI RENDER ====== */
+  /* ====== UI ====== */
   let state = null;
 
   function render() {
@@ -339,8 +417,7 @@
 
     const events = state.events;
     const selected = events.filter(e => e.use).length;
-    els.summary.textContent =
-      `Parsed ${events.length} item(s). Selected: ${selected}. Month: ${state.month}/${state.year}.`;
+    els.summary.textContent = `Parsed ${events.length} item(s). Selected: ${selected}. Month: ${state.month}/${state.year}.`;
 
     const warnCount = events.reduce((a, e) => a + (e.warnings?.length ? 1 : 0), 0);
     els.warnings.textContent = warnCount ? `Warnings on ${warnCount} event(s) — review before syncing.` : "";
@@ -348,7 +425,6 @@
     for (const ev of events) {
       const tr = document.createElement("tr");
 
-      // Use
       const tdUse = document.createElement("td");
       const cb = document.createElement("input");
       cb.type = "checkbox";
@@ -357,16 +433,14 @@
       tdUse.appendChild(cb);
       tr.appendChild(tdUse);
 
-      // Date/time
       const tdDT = document.createElement("td");
       if (ev.allDay) {
-        tdDT.textContent = `${dateOnly(ev.start)} (all day)`;
+        tdDT.textContent = `${ymdToStr(ev.startYMD)} (all day)`;
       } else {
-        tdDT.textContent = `${dateOnly(ev.start)} ${hm(ev.start)} → ${dateOnly(ev.end)} ${hm(ev.end)}`;
+        tdDT.textContent = `${ymdToStr(ev.startYMD)} ${ev.startHM} → ${ymdToStr(ev.endYMD)} ${ev.endHM}`;
       }
       tr.appendChild(tdDT);
 
-      // Title editable (identity uses sourceTitle + occ, not this edited title)
       const tdTitle = document.createElement("td");
       const inp = document.createElement("input");
       inp.value = ev.title;
@@ -374,7 +448,6 @@
       tdTitle.appendChild(inp);
       tr.appendChild(tdTitle);
 
-      // Warnings
       const tdW = document.createElement("td");
       tdW.className = "warn";
       tdW.textContent = (ev.warnings || []).join(" | ");
@@ -492,20 +565,13 @@
     };
 
     if (ev.allDay) {
-      body.start = { date: dateOnly(ev.start) };
-      body.end = { date: dateOnly(ev.end) };
+      body.start = { date: ymdToStr(ev.startYMD) };
+      body.end = { date: ymdToStr(ev.endYMD) };
     } else {
-      // Let Google store as RFC3339; we match by marsMatchKey, not by returned dateTime formatting
-      body.start = { dateTime: ev.start.toISOString() };
-      body.end = { dateTime: ev.end.toISOString() };
+      body.start = { dateTime: rfc3339LocalStr(ev.startYMD, ev.startHM), timeZone: TZ };
+      body.end = { dateTime: rfc3339LocalStr(ev.endYMD, ev.endHM), timeZone: TZ };
     }
     return body;
-  }
-
-  function monthBoundsLocal(month, year) {
-    const start = new Date(year, month - 1, 1, 0, 0, 0, 0);
-    const end = new Date(year, month, 1, 0, 0, 0, 0); // end-exclusive
-    return { start, end };
   }
 
   function buildIndexByMatchKey(items) {
@@ -533,26 +599,35 @@
     const now = new Date();
     const nowPlus1s = new Date(now.getTime() + 1000);
 
-    // This pasted month/year’s range (local), plus 1-day buffer back for overnight starts
-    const { start: monthStart, end: monthEnd } = monthBoundsLocal(state.month, state.year);
-    const rangeStart = addDays(monthStart, -1);
-    const rangeEnd = monthEnd;
+    // Window is ONLY this pasted month (plus 1-day buffer backward for overnights).
+    const mStartYMD = monthStartYMD(state.year, state.month);
+    const mEndYMD = monthEndYMD(state.year, state.month);
+    const rangeStartYMD = ymdAddDays(mStartYMD, -1);
+    const rangeEndYMD = mEndYMD;
 
-    log(`Now: ${now.toISOString()}`);
+    const rangeStart = zonedWallTimeToDate(rangeStartYMD.y, rangeStartYMD.m, rangeStartYMD.d, 0, 0, 0);
+    const rangeEnd = zonedWallTimeToDate(rangeEndYMD.y, rangeEndYMD.m, rangeEndYMD.d, 0, 0, 0);
+
+    log(`Now (Central): ${fmtCentral(now)}`);
+    log(`Now (UTC): ${now.toISOString()}`); // optional, but useful for debugging
     log(`Pasted month: ${state.year}-${pad2(state.month)}`);
-    log(`Month range: ${dateOnly(monthStart)} → ${dateOnly(monthEnd)} (end exclusive)`);
-    log(`Sync range (w/ buffer): ${dateOnly(rangeStart)} → ${dateOnly(rangeEnd)} (end exclusive)`);
+    log(`Month range: ${ymdToStr(mStartYMD)} → ${ymdToStr(mEndYMD)} (end exclusive)`);
+    log(`Sync range (w/ buffer): ${ymdToStr(rangeStartYMD)} → ${ymdToStr(rangeEndYMD)} (end exclusive)`);
 
     const selected = state.events
       .filter(e => e.use)
       .filter(e => e.end > rangeStart && e.start < rangeEnd)
       .sort((a, b) => a.start - b.start);
 
-    // 1) FUTURE: delete all our future events in [max(now+1s, rangeStart), rangeEnd)
+    // FUTURE delete is ONLY within [max(now+1s, rangeStart), rangeEnd)
     const futureFrom = new Date(Math.max(nowPlus1s.getTime(), rangeStart.getTime()));
     let deleted = 0;
+
     if (futureFrom < rangeEnd) {
-      log(`Deleting future MARS events from ${futureFrom.toISOString()} → ${rangeEnd.toISOString()} …`);
+      log(`Deleting future MARS events ONLY for this pasted month window…`);
+      log(`Delete window (Central): ${fmtCentral(futureFrom)} → ${fmtCentral(rangeEnd)} (end exclusive)`);
+      log(`Delete window (UTC): ${futureFrom.toISOString()} → ${rangeEnd.toISOString()} (end exclusive)`); // optional
+
       const futureItems = await listEvents(calendarId, futureFrom.toISOString(), rangeEnd.toISOString());
       for (const it of futureItems) {
         const app = it?.extendedProperties?.private?.marsApp;
@@ -566,25 +641,25 @@
       log("No future window inside this pasted month; skipping future delete.");
     }
 
-    // 2) PAST/CURRENT: build index of existing (our) events by matchKey
+    // Past/current patch: index only within [rangeStart, min(now, rangeEnd))
     const pastTo = new Date(Math.min(now.getTime(), rangeEnd.getTime()));
     let index = new Map();
+
     if (rangeStart < pastTo) {
-      log(`Indexing existing past/current MARS events from ${rangeStart.toISOString()} → ${pastTo.toISOString()} …`);
+      log(`Indexing existing past/current MARS events within this month window (Central now=${fmtCentral(now)})…`);
       const pastItems = await listEvents(calendarId, rangeStart.toISOString(), pastTo.toISOString());
       index = buildIndexByMatchKey(pastItems);
       log(`Indexed ${pastItems.filter(it => it?.extendedProperties?.private?.marsApp === "1").length} MARS event(s) in past/current window.`);
     }
 
-    // 3) Apply:
-    //    - start <= now  => patch if matchKey exists, else create
-    //    - start >  now  => create (future was deleted)
     let patched = 0, created = 0;
 
     for (const ev of selected) {
       const mk = makeMatchKey(ev);
       const body = googleBodyFromEvent(ev);
-      const isFuture = ev.start.getTime() > now.getTime(); // "happening now" counts as past/current
+
+      // “Happening now” counts as past/current (archive → patch)
+      const isFuture = ev.start.getTime() > now.getTime();
 
       if (!isFuture) {
         const q = index.get(mk);
@@ -597,12 +672,13 @@
           created++;
         }
       } else {
+        // Future is recreated fresh (we deleted future ones in-window)
         await createEvent(calendarId, body);
         created++;
       }
     }
 
-    log(`Done. Patched (past/current): ${patched}. Created (new/recreated): ${created}. Future deleted: ${deleted}.`);
+    log(`Done. Patched (past/current): ${patched}. Created (new/recreated): ${created}. Future deleted (in-month only): ${deleted}.`);
   }
 
   /* ====== WIRE UI ====== */
@@ -664,7 +740,8 @@
       await syncToGoogle();
     } catch (e) {
       // If token needs user gesture/consent again, try interactive once.
-      if (String(e.message || "").includes("401") || String(e.message || "").toLowerCase().includes("invalid_token")) {
+      const msg = String(e.message || "");
+      if (msg.includes("401") || msg.toLowerCase().includes("invalid_token")) {
         try {
           log("Auth expired; requesting permission again…");
           await ensureToken(true);
