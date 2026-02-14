@@ -460,7 +460,7 @@ function fnv1a16(str) {
 
 function makeEventId(ev) {
   const key = `${ev.title}|${ev.allDay ? dateOnly(ev.start) : toRFC3339Local(ev.start)}|${ev.allDay ? "" : toRFC3339Local(ev.end)}|${ev.raw}`;
-  return `mars-${fnv1a16(key)}`; // valid Google event id chars
+  return `mars${fnv1a16(key)}`; // ONLY [a-v0-9], no hyphens
 }
 
 async function getOrCreateCalendarIdByName(name) {
@@ -588,7 +588,7 @@ document.getElementById("syncBtn").addEventListener("click", async () => {
       let deleted = 0;
 
       for (const item of existing) {
-        if (item.id && item.id.startsWith("mars-") && !keepIds.has(item.id)) {
+        if (item.id && item.id.startsWith("mars") && !keepIds.has(item.id)) {
           await deleteEvent(calendarId, item.id);
           deleted++;
         }
