@@ -6,7 +6,7 @@
 
   /* ====== CONFIG ====== */
   const TZ = "America/Chicago";
-  const GOOGLE_OAUTH_CLIENT_ID = "P641865656292-2seuocq4kjjgr028dlfhjbfmucss8q0l.apps.googleusercontent.com";
+  const GOOGLE_OAUTH_CLIENT_ID = "641865656292-2seuocq4kjjgr028dlfhjbfmucss8q0l.apps.googleusercontent.com";
   const GOOGLE_SCOPE = "https://www.googleapis.com/auth/calendar";
   const DEFAULT_IGNORE_TEXT = ""; //RDO is always ignored
 
@@ -759,3 +759,4 @@
   initDefaults();
   render();
 })();
+
