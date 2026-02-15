@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>MARS Paste → ICS / Google Sync</title>
+  <title>MARS to Google Calendar/ICS converter</title>
   <link rel="manifest" href="manifest.json" />
 
   <!-- Google Identity Services (OAuth in-browser, no secrets) -->
@@ -20,17 +20,56 @@
     button.primary { background: #1f6feb; color: white; border-color: #1f6feb; }
     table { width: 100%; border-collapse: collapse; font-size: 14px; }
     th, td { border-bottom: 1px solid #eee; padding: 8px; vertical-align: top; }
-    .warn { color: #8a5a00; }
     .muted { color: #666; }
     .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #eee; font-size: 12px; }
     .small { font-size: 12px; }
+    /* Row hover highlight */
+    #eventsTable tbody tr { transition: background-color 120ms ease; }
+    #eventsTable tbody tr:hover { background: rgba(0, 0, 0, 0.05); }
+    /* Overlap highlight */
+    #eventsTable tbody tr.overlap { background: rgba(255, 0, 0, 0.12); }
+    #eventsTable tbody tr.overlap:hover { background: rgba(255, 0, 0, 0.18); }
+    /* Keep row highlight when editing inside */
+    #eventsTable tbody tr:focus-within { background: rgba(0, 0, 0, 0.05); }
+    #eventsTable tbody tr.overlap:focus-within { background: rgba(255, 0, 0, 0.18); }
+    /* Inputs: always white, no hover/focus background changes */
+    #eventsTable input {
+      background: #fff !important;
+      border: 1px solid rgba(0,0,0,0.18);
+      border-radius: 6px;
+      padding: 4px 6px;
+    }
+    /* Prevent browsers from tinting on hover */
+    #eventsTable input:hover { background: #fff !important; }
+    /* Prevent focus from tinting; keep a subtle focus ring if you want */
+    #eventsTable input:focus {
+      background: #fff !important;
+      outline: none;
+      border-color: rgba(0,0,0,0.40);
+      box-shadow: 0 0 0 2px rgba(0,0,0,0.10);
+    }
+    /* Progress bar style stuff */
+    .syncPanel.hidden { margin-top: 10px; display: none; }
+    .syncStatus { margin: 6px 0; font-weight: 600; }
+    .syncBar { width: 100%; height: 14px; }
+    .logDetails { margin-top: 8px; }
+    .logBtns { display: flex; gap: 8px; margin: 8px 0; }
+    .logBox {
+      max-height: 220px;
+      overflow: auto;
+      background: #111;
+      color: #eee;
+      padding: 10px;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.3;
+    }
   </style>
 </head>
 <body>
-  <h2>MARS Paste → ICS / Google Sync</h2>
+  <h2>MARS to Google Calendar/ICS converter</h2>
   <p class="muted">
-    Log into your work site normally (2FA as usual), copy the month view text, paste here, review, then export or sync.
-    No work-site login is stored anywhere.
+    Log into MARS. Click anywhere in the calendar, select all (Ctrl-A), copy (Ctrl-C), and paste it here. Make sure you verify what it parsed in the bottom of the page.
   </p>
 
   <!-- Hidden client id input (not shown). app.js fills it from the constant. -->
@@ -41,15 +80,15 @@
       <label><strong>Paste schedule text</strong></label>
       <textarea id="pasteBox" placeholder="Paste the month text here..."></textarea>
       <div class="muted small" style="margin-top:6px">
-        Tip: Paste one month at a time. The parser looks for the first “Month YYYY” and the day blocks.
+        Note: Make sure you only paste one month at a time.
       </div>
     </div>
 
     <div class="card">
       <label><strong>Ignore items containing (one per line)</strong></label>
-      <textarea id="ignoreBox" placeholder="NH CLASS"></textarea>
+      <textarea id="ignoreBox" placeholder="Example: SDD"></textarea>
       <div class="muted small" style="margin-top:6px">
-        Substring match (case-insensitive). Put <span class="pill">/regex/</span> to use a regular expression.
+        This field is case-insensitive. Put <span class="pill">/regex/</span> to use a regular expression.
         <br/>Note: <span class="pill">RDO</span> is always ignored automatically.
       </div>
     </div>
@@ -59,10 +98,9 @@
         <button id="parseBtn" class="primary">Parse</button>
         <button id="selectAllBtn">Select all</button>
         <button id="selectNoneBtn">Select none</button>
-        <button id="downloadBtn">Download ICS</button>
+        <button id="downloadBtn">Download ICS (untested, may not work)</button>
       </div>
       <div id="summary" class="muted" style="margin-top:8px"></div>
-      <div id="warnings" class="warn" style="margin-top:6px"></div>
     </div>
 
     <div class="card">
@@ -76,7 +114,19 @@
         <button id="syncBtn" class="primary">Sync selected to Google</button>
       </div>
 
-      <div id="syncLog" class="muted" style="margin-top:8px; white-space:pre-wrap"></div>
+      <div id="syncPanel" class="syncPanel hidden">
+        <div id="syncStatus" class="syncStatus">Idle.</div>
+        <progress id="syncBar" class="syncBar"></progress>
+      
+        <details id="logDetails" class="logDetails">
+          <summary>Show sync log</summary>
+          <div class="logBtns">
+            <button id="copyLogBtn" type="button">Copy log</button>
+            <button id="clearLogBtn" type="button">Clear log</button>
+          </div>
+          <pre id="syncLog" class="logBox"></pre>
+        </details>
+      </div>
     </div>
 
     <div class="card">
@@ -85,9 +135,9 @@
           <thead>
             <tr>
               <th>Use</th>
-              <th>Date/Time</th>
-              <th>Title (editable)</th>
-              <th>Warnings</th>
+              <th>Start (Central)</th>
+              <th>End (Central)</th>
+              <th>Title</th>
             </tr>
           </thead>
           <tbody></tbody>

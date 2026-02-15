@@ -21,18 +21,79 @@
     dl: $("downloadBtn"),
     tableBody: document.querySelector("#eventsTable tbody"),
     summary: $("summary"),
-    warnings: $("warnings"),
     calName: $("calendarNameBox"),
     connect: $("connectBtn"),
     sync: $("syncBtn"),
     log: $("syncLog"),
+    status: $("syncStatus"),
+    bar: $("syncBar"),
+    logDetails: $("logDetails"),
+    copyLogBtn: $("copyLogBtn"),
+    clearLogBtn: $("clearLogBtn"),
+    panel: $("syncPanel"),
   };
 
   /* ====== LOG ====== */
-  function log(msg) {
-    els.log.textContent = (els.log.textContent ? els.log.textContent + "\n" : "") + msg;
+  let logLines = [];
+  let progDone = 0;
+  let progTotal = null;
+  
+  function renderLog() {
+    els.log.textContent = logLines.join("\n");
   }
-  function clearLog() { els.log.textContent = ""; }
+  
+  function log(msg) {
+    logLines.push(msg);
+    renderLog();
+  }
+  
+  function clearLog() {
+    logLines = [];
+    renderLog();
+  }
+  
+  function setStatus(msg) {
+    els.status.textContent = msg;
+  }
+  
+  function resetProgress() {
+    progDone = 0;
+    progTotal = null;
+    setStatus("Idle.");
+    els.bar.max = 1;
+    els.bar.value = 0; // NOT indeterminate => no bouncing
+    hideSyncUI();
+  }
+
+  function setTotal(totalSteps) {
+    progTotal = Math.max(1, totalSteps);
+    els.bar.max = progTotal;
+    els.bar.value = progDone;
+  }
+  
+  function step(statusMsg) {
+    progDone += 1;
+    if (statusMsg) setStatus(statusMsg);
+    if (progTotal !== null) {
+      els.bar.value = Math.min(progDone, progTotal);
+    } else {
+      // still indeterminate
+      els.bar.removeAttribute("value");
+    }
+  }
+  
+  function finish(statusMsg) {
+    if (progTotal === null) setTotal(Math.max(1, progDone));
+    els.bar.value = progTotal;
+    setStatus(statusMsg || "Done.");
+  }
+
+  function showSyncUI() {
+    els.panel?.classList.remove("hidden");
+  }
+  function hideSyncUI() {
+    els.panel?.classList.add("hidden");
+  }
 
   /* ====== SMALL UTILS ====== */
   const pad2 = (n) => String(n).padStart(2, "0");
@@ -51,6 +112,82 @@
     return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1, d: 1 }; // first of next month
   }
 
+  function shiftYearMonth(y, m, deltaMonths) {
+    const dt = new Date(Date.UTC(y, m - 1, 1));
+    dt.setUTCMonth(dt.getUTCMonth() + deltaMonths);
+    return { y: dt.getUTCFullYear(), m: dt.getUTCMonth() + 1 };
+  }
+
+  function ymdCompare(a, b) {
+    if (a.y !== b.y) return a.y - b.y;
+    if (a.m !== b.m) return a.m - b.m;
+    return a.d - b.d;
+  }
+
+  function strToYMD(s) {
+    const [y, m, d] = String(s || "").split("-").map(Number);
+    if (!y || !m || !d) return null;
+    return { y, m, d };
+  }
+  
+  function ymdToInput(ymdObj) {
+    return `${ymdObj.y}-${pad2(ymdObj.m)}-${pad2(ymdObj.d)}`;
+  }
+  
+  // Recompute Date objects from Central wall time fields after edits
+  function recomputeEventDates(ev) {
+    if (ev.allDay) {
+      // Ensure end is after start (end-exclusive)
+      if (ymdCompare(ev.endYMD, ev.startYMD) <= 0) {
+        ev.endYMD = ymdAddDays(ev.startYMD, 1);
+        ev.warnings = [...(ev.warnings || []), "End <= start; auto-bumped end date +1 day."];
+      }
+      ev.start = zonedWallTimeToDate(ev.startYMD.y, ev.startYMD.m, ev.startYMD.d, 0, 0, 0);
+      ev.end = zonedWallTimeToDate(ev.endYMD.y, ev.endYMD.m, ev.endYMD.d, 0, 0, 0);
+      return;
+    }
+  
+    const [sh, sm] = (ev.startHM || "00:00").split(":").map(Number);
+    const [eh, em] = (ev.endHM || "00:00").split(":").map(Number);
+  
+    ev.start = zonedWallTimeToDate(ev.startYMD.y, ev.startYMD.m, ev.startYMD.d, sh, sm, 0);
+    ev.end = zonedWallTimeToDate(ev.endYMD.y, ev.endYMD.m, ev.endYMD.d, eh, em, 0);
+  
+    if (ev.end <= ev.start) {
+      // If user makes it invalid, assume it crosses midnight and bump end date
+      ev.endYMD = ymdAddDays(ev.endYMD, 1);
+      ev.end = zonedWallTimeToDate(ev.endYMD.y, ev.endYMD.m, ev.endYMD.d, eh, em, 0);
+      ev.warnings = [...(ev.warnings || []), "End <= start; assumed overnight and bumped end date +1 day."];
+    }
+  }
+  
+  // Overlap detector (timed events only)
+  function computeOverlapSet(events) {
+    const flagged = new Set();
+    const items = events
+      .filter(e => e.use && !e.allDay)
+      .slice()
+      .sort((a, b) => a.start - b.start);
+  
+    const active = [];
+    for (const ev of items) {
+      // drop inactive
+      for (let i = active.length - 1; i >= 0; i--) {
+        if (active[i].end <= ev.start) active.splice(i, 1);
+      }
+      // any remaining active overlaps
+      for (const a of active) {
+        if (a.end > ev.start && a.start < ev.end) {
+          flagged.add(a);
+          flagged.add(ev);
+        }
+      }
+      active.push(ev);
+    }
+    return flagged;
+  }
+
+  
   // Intl formatter for getting timezone-aware parts
   const dtfParts = new Intl.DateTimeFormat("en-US", {
     timeZone: TZ,
@@ -204,13 +341,59 @@
     const events = [];
     const occMap = new Map(); // baseSig -> count
 
+    const daysInMainMonth = new Date(Date.UTC(year, month, 0)).getUTCDate(); // e.g., 31 for March
+    let startedMainMonth = false;   // becomes true at the first day "1"
+    let monthOffset = 0;            // 0 = main month, +1 = next month
+    let lastDayNum = null;          // last processed cell day number
+    let maxCellYMD = null;          // for syncing overflow days safely
+
+
     let i = 0;
     while (i < lines.length) {
       const dm = lines[i].match(RX_DAY);
       if (!dm) { i++; continue; }
 
       const cellDay = Number(dm[1]);
-      const cellYMD = ymd(year, month, cellDay);
+
+      // Ignore leading previous-month cells entirely until we see the first "1"
+      if (!startedMainMonth) {
+      if (cellDay === 1) {
+        startedMainMonth = true;
+        monthOffset = 0;
+        lastDayNum = 1;
+      } else {
+      // previous month cell (ignore block + its events)
+      // We still need to advance i through the block, so keep going,
+      // but skip processing block content below.
+      i++;
+      while (i < lines.length && !RX_DAY.test(lines[i])) {
+        const ln = lines[i].trim();
+        if (ln && isCalendarNavLine(ln)) break;
+        i++;
+      }
+      continue;
+      }
+    } else {
+    // Detect end-of-month rollover: 29/30/31 -> 1/2/3/...
+    if (
+      monthOffset === 0 &&
+      lastDayNum !== null &&
+      lastDayNum >= daysInMainMonth - 3 &&
+      cellDay <= 7 &&
+      cellDay < lastDayNum
+    ) {
+      monthOffset = 1; // next month starts (overflow days)
+    }
+    lastDayNum = cellDay;
+  }
+
+    // Compute the actual year/month for this cell
+    const ym = shiftYearMonth(year, month, monthOffset);
+    const cellYMD = ymd(ym.y, ym.m, cellDay);
+    
+    // Track the maximum displayed cell date (for sync window end)
+    if (!maxCellYMD || ymdCompare(cellYMD, maxCellYMD) > 0) maxCellYMD = cellYMD;
+
 
       i++;
       const block = [];
@@ -274,14 +457,14 @@
 
           // start day can be in previous month (if startDay > cellDay)
           if (startDay > cellDay) {
-            const prev = new Date(Date.UTC(year, month - 1, 1));
-            prev.setUTCMonth(prev.getUTCMonth() - 1);
-            startYMD = ymd(prev.getUTCFullYear(), prev.getUTCMonth() + 1, startDay);
+            const prevYM = shiftYearMonth(cellYMD.y, cellYMD.m, -1);
+            startYMD = ymd(prevYM.y, prevYM.m, startDay);
           } else {
-            startYMD = ymd(year, month, startDay);
+            startYMD = ymd(cellYMD.y, cellYMD.m, startDay);
           }
 
           endYMD = cellYMD;
+
 
           const [sh, sm] = startHM.split(":").map(Number);
           const [eh, em] = endHM.split(":").map(Number);
@@ -365,7 +548,16 @@
       }
     }
 
-    return { month, year, events };
+    const windowStartYMD = ymd(year, month, 1);
+    const windowEndYMD = maxCellYMD ? ymdAddDays(maxCellYMD, 1) : monthEndYMD(year, month); // end-exclusive
+
+    // Stable identity key: based on originally-parsed values; DO NOT change on edits
+    for (const ev of events) {
+      if (!ev.idKey) ev.idKey = makeMatchKey(ev);
+    }
+
+
+    return { month, year, windowStartYMD, windowEndYMD, events };
   }
 
   /* ====== ICS ====== */
@@ -415,17 +607,20 @@
       els.warnings.textContent = "";
       return;
     }
-
+  
     const events = state.events;
+  
+    // Mark overlaps (timed + selected only)
+    const overlapSet = computeOverlapSet(events);
+  
     const selected = events.filter(e => e.use).length;
     els.summary.textContent = `Parsed ${events.length} item(s). Selected: ${selected}. Month: ${state.month}/${state.year}.`;
-
-    const warnCount = events.reduce((a, e) => a + (e.warnings?.length ? 1 : 0), 0);
-    els.warnings.textContent = warnCount ? `Warnings on ${warnCount} event(s) — review before syncing.` : "";
-
+  
     for (const ev of events) {
       const tr = document.createElement("tr");
-
+      tr.classList.toggle("overlap", overlapSet.has(ev));
+  
+      // Use
       const tdUse = document.createElement("td");
       const cb = document.createElement("input");
       cb.type = "checkbox";
@@ -433,30 +628,78 @@
       cb.addEventListener("change", () => { ev.use = cb.checked; render(); });
       tdUse.appendChild(cb);
       tr.appendChild(tdUse);
-
-      const tdDT = document.createElement("td");
-      if (ev.allDay) {
-        tdDT.textContent = `${ymdToStr(ev.startYMD)} (all day)`;
-      } else {
-        tdDT.textContent = `${ymdToStr(ev.startYMD)} ${ev.startHM} → ${ymdToStr(ev.endYMD)} ${ev.endHM}`;
-      }
-      tr.appendChild(tdDT);
-
+  
+      // Start editor
+      const tdStart = document.createElement("td");
+      const startDate = document.createElement("input");
+      startDate.type = "date";
+      startDate.value = ymdToInput(ev.startYMD);
+  
+      const startTime = document.createElement("input");
+      startTime.type = "time";
+      startTime.step = 60;
+      startTime.value = ev.allDay ? "" : (ev.startHM || "00:00");
+      startTime.disabled = ev.allDay;
+  
+      tdStart.appendChild(startDate);
+      tdStart.appendChild(document.createTextNode(" "));
+      tdStart.appendChild(startTime);
+      tr.appendChild(tdStart);
+  
+      // End editor
+      const tdEnd = document.createElement("td");
+      const endDate = document.createElement("input");
+      endDate.type = "date";
+      endDate.value = ymdToInput(ev.endYMD);
+  
+      const endTime = document.createElement("input");
+      endTime.type = "time";
+      endTime.step = 60;
+      endTime.value = ev.allDay ? "" : (ev.endHM || "00:00");
+      endTime.disabled = ev.allDay;
+  
+      tdEnd.appendChild(endDate);
+      tdEnd.appendChild(document.createTextNode(" "));
+      tdEnd.appendChild(endTime);
+      tr.appendChild(tdEnd);
+  
+      // Wire edits
+      const onEdit = () => {
+        const sY = strToYMD(startDate.value);
+        const eY = strToYMD(endDate.value);
+        if (!sY || !eY) return;
+  
+        ev.startYMD = sY;
+        ev.endYMD = eY;
+  
+        if (!ev.allDay) {
+          ev.startHM = startTime.value || ev.startHM || "00:00";
+          ev.endHM = endTime.value || ev.endHM || "00:00";
+        }
+  
+        // keep idKey stable; only recompute Date objects and validations
+        ev.warnings = (ev.warnings || []).filter(w => !w.startsWith("End <= start;"));
+        recomputeEventDates(ev);
+        render();
+      };
+  
+      startDate.addEventListener("change", onEdit);
+      endDate.addEventListener("change", onEdit);
+      startTime.addEventListener("change", onEdit);
+      endTime.addEventListener("change", onEdit);
+  
+      // Title
       const tdTitle = document.createElement("td");
       const inp = document.createElement("input");
       inp.value = ev.title;
       inp.addEventListener("input", () => { ev.title = inp.value; });
       tdTitle.appendChild(inp);
       tr.appendChild(tdTitle);
-
-      const tdW = document.createElement("td");
-      tdW.className = "warn";
-      tdW.textContent = (ev.warnings || []).join(" | ");
-      tr.appendChild(tdW);
-
+  
       els.tableBody.appendChild(tr);
     }
   }
+
 
   /* ====== GOOGLE SYNC ====== */
   let tokenClient = null;
@@ -558,13 +801,15 @@
   }
 
   function googleBodyFromEvent(ev) {
-    const mk = makeMatchKey(ev);
+    const idKey = ev.idKey || makeMatchKey(ev);     // stable identity
+    const matchKey = makeMatchKey(ev);             // current (after edits)
+  
     const body = {
       summary: ev.title,
-      description: `RAW: ${ev.raw}${ev.warnings?.length ? "\nWARNINGS: " + ev.warnings.join(" | ") : ""}`,
-      extendedProperties: { private: { marsApp: "1", marsMatchKey: mk } }
+      description: `RAW: ${ev.raw}`,
+      extendedProperties: { private: { marsApp: "1", marsIdKey: idKey, marsMatchKey: matchKey } }
     };
-
+  
     if (ev.allDay) {
       body.start = { date: ymdToStr(ev.startYMD) };
       body.end = { date: ymdToStr(ev.endYMD) };
@@ -575,19 +820,32 @@
     return body;
   }
 
-  function buildIndexByMatchKey(items) {
-    const map = new Map(); // marsMatchKey -> [eventId,...]
+  function buildIndexByIdKey(items) {
+    const map = new Map(); // idKey -> [eventId,...]
     for (const it of items) {
-      const mk = it?.extendedProperties?.private?.marsMatchKey;
       const app = it?.extendedProperties?.private?.marsApp;
-      if (!it?.id || app !== "1" || !mk) continue;
-      if (!map.has(mk)) map.set(mk, []);
-      map.get(mk).push(it.id);
+      if (app !== "1" || !it?.id) continue;
+  
+      // New field preferred; fallback to old matchKey for backward compatibility
+      const key =
+        it?.extendedProperties?.private?.marsIdKey ||
+        it?.extendedProperties?.private?.marsMatchKey;
+  
+      if (!key) continue;
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(it.id);
     }
     return map;
   }
 
-  async function syncToGoogle() {
+
+  async function syncToGoogle(rep) {
+    rep = rep || {};
+    const repStatus = rep.status || (() => {});
+    const repStep = rep.step || (() => {});
+    const repSetTotal = rep.setTotal || (() => {});
+    const repLog = rep.log || (() => {});
+
     if (!state) throw new Error("Parse a month first.");
 
     const calName = String(els.calName.value || "Work (MARS)").trim();
@@ -596,15 +854,15 @@
     log(`Using calendar: ${calName}`);
     const calendarId = await getOrCreateCalendarIdByName(calName);
     log("Calendar OK.");
+    repStep("Calendar OK.");
 
     const now = new Date();
     const nowPlus1s = new Date(now.getTime() + 1000);
 
     // Window is ONLY this pasted month (plus 1-day buffer backward for overnights).
-    const mStartYMD = monthStartYMD(state.year, state.month);
-    const mEndYMD = monthEndYMD(state.year, state.month);
-    const rangeStartYMD = ymdAddDays(mStartYMD, -1);
-    const rangeEndYMD = mEndYMD;
+    const rangeStartYMD = state.windowStartYMD; // main month start (no previous-month deletion)
+    const rangeEndYMD = state.windowEndYMD;     // includes only visible overflow days
+
 
     const rangeStart = zonedWallTimeToDate(rangeStartYMD.y, rangeStartYMD.m, rangeStartYMD.d, 0, 0, 0);
     const rangeEnd = zonedWallTimeToDate(rangeEndYMD.y, rangeEndYMD.m, rangeEndYMD.d, 0, 0, 0);
@@ -612,13 +870,16 @@
     log(`Now (Central): ${fmtCentral(now)}`);
     log(`Now (UTC): ${now.toISOString()}`); // optional, but useful for debugging
     log(`Pasted month: ${state.year}-${pad2(state.month)}`);
-    log(`Month range: ${ymdToStr(mStartYMD)} → ${ymdToStr(mEndYMD)} (end exclusive)`);
-    log(`Sync range (w/ buffer): ${ymdToStr(rangeStartYMD)} → ${ymdToStr(rangeEndYMD)} (end exclusive)`);
+    log(`Window range: ${ymdToStr(rangeStartYMD)} → ${ymdToStr(rangeEndYMD)} (end exclusive)`);
+    log(`Sync range: ${ymdToStr(rangeStartYMD)} → ${ymdToStr(rangeEndYMD)} (end exclusive)`);
 
     const selected = state.events
       .filter(e => e.use)
       .filter(e => e.end > rangeStart && e.start < rangeEnd)
       .sort((a, b) => a.start - b.start);
+
+    repStatus(`Preparing… ${selected.length} item(s) selected`);
+    repSetTotal(selected.length + 3); // baseline (auth/calendar/index + apply)
 
     // FUTURE delete is ONLY within [max(now+1s, rangeStart), rangeEnd)
     const futureFrom = new Date(Math.max(nowPlus1s.getTime(), rangeStart.getTime()));
@@ -630,12 +891,16 @@
       log(`Delete window (UTC): ${futureFrom.toISOString()} → ${rangeEnd.toISOString()} (end exclusive)`); // optional
 
       const futureItems = await listEvents(calendarId, futureFrom.toISOString(), rangeEnd.toISOString());
-      for (const it of futureItems) {
-        const app = it?.extendedProperties?.private?.marsApp;
-        if (it?.id && app === "1") {
-          await deleteEvent(calendarId, it.id);
-          deleted++;
-        }
+      const toDelete = futureItems.filter(it => it?.id && it?.extendedProperties?.private?.marsApp === "1");
+      repLog(`Future events in window: ${futureItems.length}, ours: ${toDelete.length}`);
+      // Rough progress total: deletes + applies + a few fixed steps
+      repSetTotal(toDelete.length + selected.length + 3);
+      let delN = 0;
+      for (const it of toDelete) {
+        await deleteEvent(calendarId, it.id);
+        delN++;
+        deleted++;
+        repStep(`Deleting future… ${delN}/${toDelete.length}`);
       }
       log(`Deleted ${deleted} future MARS event(s).`);
     } else {
@@ -649,21 +914,27 @@
     if (rangeStart < pastTo) {
       log(`Indexing existing past/current MARS events within this month window (Central now=${fmtCentral(now)})…`);
       const pastItems = await listEvents(calendarId, rangeStart.toISOString(), pastTo.toISOString());
-      index = buildIndexByMatchKey(pastItems);
+      index = buildIndexByIdKey(pastItems);
       log(`Indexed ${pastItems.filter(it => it?.extendedProperties?.private?.marsApp === "1").length} MARS event(s) in past/current window.`);
     }
+    repStep("Indexed past/current.");
 
     let patched = 0, created = 0;
-
+    
+    let n = 0;
     for (const ev of selected) {
-      const mk = makeMatchKey(ev);
+      n++;
+      repStep(`Syncing… ${n}/${selected.length}`);
+      // stable identity key (does NOT change when you edit date/time)
+      const key = ev.idKey || makeMatchKey(ev);
+    
       const body = googleBodyFromEvent(ev);
-
+    
       // “Happening now” counts as past/current (archive → patch)
       const isFuture = ev.start.getTime() > now.getTime();
-
+    
       if (!isFuture) {
-        const q = index.get(mk);
+        const q = index.get(key);
         if (q && q.length) {
           const eventId = q.shift();
           await patchEvent(calendarId, eventId, body);
@@ -673,12 +944,12 @@
           created++;
         }
       } else {
-        // Future is recreated fresh (we deleted future ones in-window)
         await createEvent(calendarId, body);
         created++;
       }
     }
 
+    repStep("Finalizing…");
     log(`Done. Patched (past/current): ${patched}. Created (new/recreated): ${created}. Future deleted (in-month only): ${deleted}.`);
   }
 
@@ -723,38 +994,89 @@
 
   els.connect?.addEventListener("click", async () => {
     clearLog();
+    resetProgress();
+    els.logDetails.open = false;
+  
     try {
-      initTokenClient();
+      setStatus("Requesting Google permission…");
       log("Requesting Google permission…");
       await ensureToken(true);
+      setTotal(1);
+      step("Connected.");
       log("Connected.");
+      finish("Connected.");
     } catch (e) {
       log("Connect failed: " + (e.message || e));
+      setStatus("Connect failed (open log).");
+      els.logDetails.open = true;
     }
   });
 
   els.sync?.addEventListener("click", async () => {
     clearLog();
-    try {
+    resetProgress();
+    showSyncUI();
+    els.logDetails.open = false;
+  
+    const run = async (interactiveAuth) => {
+      setStatus("Checking Google auth…");
       log("Checking Google auth…");
-      await ensureToken(false);
-      await syncToGoogle();
+      await ensureToken(interactiveAuth);
+      step("Auth OK.");
+  
+      // Reporter lets syncToGoogle update progress + status
+      const reporter = {
+        // Call once when you know how many ops you’ll do
+        setTotal,
+        // Call for each meaningful step
+        step: (msg) => { step(msg); },
+        // Optional: show plain status without increment
+        status: (msg) => setStatus(msg),
+        // Optional: keep writing to log
+        log,
+      };
+  
+      await syncToGoogle(reporter);
+      finish("Sync complete.");
+      log("Sync complete.");
+    };
+  
+    try {
+      await run(false);
     } catch (e) {
-      // If token needs user gesture/consent again, try interactive once.
-      const msg = String(e.message || "");
+      const msg = String(e?.message || e || "");
       if (msg.includes("401") || msg.toLowerCase().includes("invalid_token")) {
         try {
+          setStatus("Auth expired; requesting permission…");
           log("Auth expired; requesting permission again…");
-          await ensureToken(true);
-          await syncToGoogle();
+          await run(true);
           return;
         } catch (e2) {
           log("Sync failed: " + (e2.message || e2));
+          setStatus("Sync failed (open log).");
+          els.logDetails.open = true;
           return;
         }
       }
       log("Sync failed: " + (e.message || e));
+      setStatus("Sync failed (open log).");
+      els.logDetails.open = true;
     }
+  });
+
+
+  els.copyLogBtn?.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(logLines.join("\n"));
+      setStatus("Log copied.");
+    } catch {
+      setStatus("Could not copy log (browser blocked clipboard).");
+    }
+  });
+  
+  els.clearLogBtn?.addEventListener("click", () => {
+    clearLog();
+    resetProgress();
   });
 
   initDefaults();
