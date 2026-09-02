@@ -1,9 +1,9 @@
 {
-  "name": "MARS Paste to ICS",
-  "short_name": "MARS→ICS",
+  "name": "MARS Calendar Importer",
+  "short_name": "MARS Import",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#ffffff",
-  "theme_color": "#1f6feb",
+  "background_color": "#f7f5ef",
+  "theme_color": "#2f6b4f",
   "icons": []
 }
